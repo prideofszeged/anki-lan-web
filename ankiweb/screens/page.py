@@ -14,13 +14,6 @@ _NIGHT_CSS = (
     "html.night-mode textarea{background:#3a3a3a;color:#e0e0e0;border-color:#555;}"
     "html.night-mode table,html.night-mode th,html.night-mode td{border-color:#555;}"
     "html.night-mode .zero-count{color:#888;}"
-    "html.night-mode #ankiweb-bottomnav{background:#1e1e1e;border-color:#444;}"
-    "html.night-mode #ankiweb-bottomnav .tab-item{color:#aaa;}"
-    "html.night-mode #ankiweb-bottomnav .tab-item.active{color:#6cb6ff;}"
-    "html.night-mode #ankiweb-more-sheet .panel{background:#1e1e1e;border-color:#444;color:#e0e0e0;}"
-    "html.night-mode #ankiweb-more-sheet .hdr{border-color:#444;}"
-    "html.night-mode #ankiweb-more-sheet .items a,"
-    "html.night-mode #ankiweb-more-sheet .items button{color:#e0e0e0;}"
     "</style>"
 )
 
@@ -51,43 +44,6 @@ _TOOLBAR_CSS = (
     "</style>"
 )
 
-# Choice for Reviewer on compact viewport (SPEC T8a):
-# Hide the bottom tab bar on /reviewer so the answer buttons (Show Answer,
-# Again/Hard/Good/Easy) sit cleanly at the bottom edge with env(safe-area-inset-bottom)
-# padding without overlap. Retain a compact top toolbar on /reviewer with a link back to Decks.
-_BOTTOMNAV_CSS = (
-    "<style>"
-    "#ankiweb-bottomnav{display:none;}"
-    "@media(max-width:639px){"
-    "#ankiweb-toolbar{display:none;}"
-    "#ankiweb-bottomnav{position:fixed;bottom:0;left:0;right:0;height:auto;min-height:48px;"
-    "display:flex;align-items:stretch;justify-content:space-around;background:#f0f0f0;"
-    "border-top:1px solid #ccc;z-index:2000;padding-bottom:env(safe-area-inset-bottom);}"
-    "#ankiweb-bottomnav .tab-item{flex:1 1 0;min-width:44px;min-height:44px;display:flex;"
-    "flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:4px 2px;"
-    "text-decoration:none;color:#555;font-size:11px;background:transparent;border:0;cursor:pointer;"
-    "box-sizing:border-box;font-family:inherit;}"
-    "#ankiweb-bottomnav .tab-item svg{width:20px;height:20px;flex-shrink:0;stroke:currentColor;fill:none;}"
-    "#ankiweb-bottomnav .tab-item.active{color:#2563eb;font-weight:600;}"
-    "#ankiweb-more-sheet[hidden]{display:none;}"
-    "#ankiweb-more-sheet{position:fixed;inset:0;z-index:2500;display:flex;flex-direction:column;justify-content:flex-end;}"
-    "#ankiweb-more-sheet .backdrop{position:absolute;inset:0;background:rgba(0,0,0,.45);}"
-    "#ankiweb-more-sheet .panel{position:relative;background:#f0f0f0;border-top:1px solid #ccc;"
-    "border-radius:14px 14px 0 0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));max-height:80vh;overflow-y:auto;}"
-    "#ankiweb-more-sheet .hdr{display:flex;align-items:center;justify-content:space-between;padding-bottom:8px;border-bottom:1px solid #ddd;font-weight:600;}"
-    "#ankiweb-more-sheet .close{background:transparent;border:0;font-size:18px;min-width:44px;min-height:44px;cursor:pointer;}"
-    "#ankiweb-more-sheet .items{display:flex;flex-direction:column;gap:4px;margin-top:8px;}"
-    "#ankiweb-more-sheet .items a,#ankiweb-more-sheet .items button{display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 12px;color:#333;text-decoration:none;border-radius:6px;background:transparent;border:0;font-size:14px;width:100%;text-align:left;box-sizing:border-box;cursor:pointer;font-family:inherit;}"
-    "body[data-context='reviewer'] #ankiweb-bottomnav,"
-    "body[data-context='reviewer'] #ankiweb-more-sheet{display:none !important;}"
-    "body[data-context='reviewer'] #ankiweb-toolbar{display:flex !important;position:fixed;top:0;left:0;right:0;min-height:44px !important;height:auto !important;padding:0 max(12px,env(safe-area-inset-left)) !important;align-items:center;justify-content:space-between;z-index:2000;}"
-    "body[data-context='reviewer'] #ankiweb-toolbar a:not([href='/deckbrowser']){display:none !important;}"
-    "body[data-context='reviewer'] #ankiweb-toolbar .menu{display:none !important;}"
-    "body[data-context='reviewer'] #ankiweb-toolbar a[href='/deckbrowser']{display:inline-flex !important;align-items:center;min-height:44px;font-weight:600;}"
-    "body[data-context='reviewer'] #ankiweb-toolbar .nm{display:inline-flex !important;}"
-    "}"
-    "</style>"
-)
 
 def _toolbar_html() -> str:
     """Built per request so the labels reflect the active language (a module-level
@@ -199,7 +155,7 @@ def render_page(
     """
     links = "".join(f'<link rel="stylesheet" href="/_anki/{c}">' for c in css_files)
     scripts = "".join(f'<script src="/_anki/{j}"></script>' for j in js_files)
-    bar_css = (_TOOLBAR_CSS + _BOTTOMNAV_CSS) if toolbar else ""
+    bar_css = _TOOLBAR_CSS if toolbar else ""
     bar_html = (_toolbar_html() + _bottomnav_html(context)) if toolbar else ""
     return (
         "<!doctype html>\n"
