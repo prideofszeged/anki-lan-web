@@ -1,4 +1,4 @@
-const CACHE = "anki-lan-shell-v1";
+const CACHE = "anki-lan-shell-26.9.3-v2";
 const SHELL = [
   "/shell/static/mobile.css",
   "/shell/static/bootstrap.js",
@@ -14,5 +14,13 @@ self.addEventListener("activate", event => event.waitUntil(
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || !url.pathname.startsWith("/shell/static/")) return;
-  event.respondWith(caches.match(event.request).then(hit => hit || fetch(event.request)));
+  event.respondWith(
+    fetch(event.request).then(response => {
+      if (response.ok) {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE).then(cache => cache.put(event.request, copy)));
+      }
+      return response;
+    }).catch(() => caches.match(event.request))
+  );
 });

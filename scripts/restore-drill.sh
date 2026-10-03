@@ -28,7 +28,7 @@ trap 'rm -rf "${scratch}"' EXIT
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --user "${PUID:-$(id -u)}:${PGID:-$(id -g)}" \
-  -e HOME=/tmp \
+  -e HOME=/tmp -e TMPDIR=/tmp \
   -v "$(dirname "${archive}"):/backups:ro" \
   -v "${scratch}:/tmp" \
   --entrypoint python "${image}" \

@@ -30,6 +30,16 @@ from ankiweb.screens.notify import render_notify_html, config_from_form, header_
 def build_screen_router(get_service, get_notifier=None) -> APIRouter:
     router = APIRouter()
 
+    async def save_upload(file: UploadFile, dest) -> None:
+        """Stream uploads to disk instead of duplicating the whole package in RAM."""
+        try:
+            with dest.open("wb") as out:
+                while chunk := await file.read(1024 * 1024):
+                    out.write(chunk)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+
     @router.get("/", response_class=HTMLResponse)
     @router.get("/deckbrowser", response_class=HTMLResponse)
     async def deckbrowser_page():
@@ -209,9 +219,7 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
                     out_path=out, options=opts, limit=lim))
                 filename, media = "export.apkg", "application/octet-stream"
             elif fmt == "colpkg":
-                await service.run(lambda col: col.export_collection_package(
-                    out, with_media, legacy))
-                await service.reopen()  # export_collection_package closed the collection
+                await service.export_collection_package(out, with_media, legacy)
                 filename, media = "collection.colpkg", "application/octet-stream"
             elif fmt == "notes_csv":
                 lim = make_limit()
@@ -232,9 +240,13 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
                 os.remove(out)
             except OSError:
                 pass
-            body = await service.run(render_export_html)
+            try:
+                body = await service.run(render_export_html)
+            except Exception:
+                body = "<p><a href='/deckbrowser'>Back to decks</a></p>"
             return HTMLResponse(render_page(
-                "export", f"<div style='color:#c00'>Export failed: {exc}</div>" + body))
+                "export", f"<div style='color:#c00'>Export failed: {exc}</div>" + body),
+                status_code=500)
         return FileResponse(out, media_type=media, filename=filename,
                             background=BackgroundTask(os.remove, out))
 
@@ -249,7 +261,7 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
         if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif"):
             return JSONResponse({"error": f"unsupported image type: {ext or '(none)'}"}, status_code=400)
         dest = import_tmp.io_allocate(service.settings, ext)
-        dest.write_bytes(await file.read())
+        await save_upload(file, dest)
         await service.run(lambda col: col.add_image_occlusion_notetype())  # idempotent ensure
         return {"path": str(dest)}
 
@@ -267,7 +279,7 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
         if route is None:
             return JSONResponse({"error": f"unsupported file type: {ext or '(none)'}"}, status_code=400)
         dest = import_tmp.allocate(service.settings, ext)
-        dest.write_bytes(await file.read())
+        await save_upload(file, dest)
         return {"route": route, "path": str(dest)}
 
     return router

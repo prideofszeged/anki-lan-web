@@ -76,3 +76,11 @@ async def test_run_op_emits_flags(service):
     flags, initiator = seen[0]
     assert initiator == "deckbrowser"
     assert flags["note"] is True
+
+
+async def test_missing_collection_requires_explicit_init(tmp_path: Path):
+    path = tmp_path / "missing" / "collection.anki2"
+    svc = CollectionService(Settings(collection_path=path, init_collection=False))
+    with pytest.raises(FileNotFoundError, match="ANKIWEB_INIT_COLLECTION"):
+        await svc.open()
+    assert not path.exists()

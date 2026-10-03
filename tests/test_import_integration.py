@@ -39,16 +39,18 @@ def test_import_csv_spa_boots(live_server_imp):
     url, csv_path = live_server_imp
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_context(bypass_csp=True).new_page()
+        page = browser.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("requestfailed",
                 lambda r: errors.append("REQFAIL " + r.url) if ("/_app/" in r.url or "/_anki/" in r.url) else None)
         posts = []
         page.on("request", lambda r: posts.append(r.url) if r.method == "POST" and "/_anki/" in r.url else None)
-        page.goto(f"{url}/import-csv/{quote(csv_path, safe='')}")
-        page.wait_for_function("document.querySelectorAll('select,button,table,input').length>2", timeout=10000)
-        page.wait_for_function("document.body.innerText.length>30", timeout=10000)
+        with page.expect_request(
+                lambda r: r.method == "POST" and
+                ("get_csv_metadata" in r.url.lower() or "getcsvmetadata" in r.url.lower()),
+                timeout=10000):
+            page.goto(f"{url}/import-csv/{quote(csv_path, safe='')}")
         assert not errors, errors
         assert any("get_csv_metadata" in u.lower() or "getcsvmetadata" in u.lower() for u in posts), posts
         browser.close()

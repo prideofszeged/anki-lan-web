@@ -8,8 +8,8 @@ Owners: **CC** = Claude Code (main checkout, `feat/modular-mobile-v1`),
 **agy** = Antigravity CLI (worktree `../anki-lan-web-agy`, branch `agy/work`).
 File ownership was disjoint per batch so the two branches merge cleanly.
 
-Test counts: 533 at start of run -> **632** on main (CC work); agy branch 548 (533 + 15). Verified in a
-throwaway combined tree (agy/work + CC uncommitted files, no overlapping paths): **647 passed**.
+Test counts: 533 at start of run -> **632** on main (CC work); agy branch 548 (533 + 15). The merged
+tree plus the post-review hardening is covered by **662 tests** (final CI result recorded on the PR).
 
 ## Done (CC, committed on feat/modular-mobile-v1, not pushed)
 - [x] T3 ADRs 0001-0004 (`docs/adr/`) + import-boundary ratchet test (`tests/test_architecture.py`)
@@ -41,16 +41,16 @@ throwaway combined tree (agy/work + CC uncommitted files, no overlapping paths):
 - [ ] Decide: add `2-seconds-of-silence.mp3` to media? ("Greek Multi" answer side references it; it is
       missing in the ORIGINAL Webtop library too, so this is pre-existing, M7 reports it as WARN)
 - [ ] Decide: sessions in memory (restart = re-login) acceptable for v1, or persist to `app.db` (SPEC §10)?
-- [ ] Pin the Caddy image digest and run `caddy validate` (not done: no image pulled)
+- [x] Caddy 2.8.4 image pinned by digest; `caddy validate` passes
+- [x] Hardened Caddy image and live HTTPS reverse-proxy path tested under dropped capabilities
 - [ ] Manual checks automation can't do: M6 playback on iOS/Android, M9 import into desktop Anki GUI
-- [ ] Run `./scripts/backup.sh` once yourself: the tool + restore-drill.sh are verified end to end on a
-      copy, but the stop/start wrapper in backup.sh has not been exercised against the live pilot
+- [x] Live pilot backup wrapper and restore drill exercised end to end
 - T12-T14 pilot, cutover (:18443), Webtop retirement: operational, out of scope for this run
 - UFW / binding 192.168.1.7:18443: not touched
 
 ## Remaining engineering (after merge)
-- [ ] CI: run `npm run typecheck`, `npm run gen:api` drift check, `tests/e2e`; add `docker compose config`
-- [ ] Combined full-suite run on the merged tree; rebuild image; `scripts/verify.sh`
+- [x] CI: Python/browser tests, TypeScript checking, generated-client drift and hardened container smoke
+- [x] Combined full-suite run on the merged tree; rebuilt image; `scripts/verify.sh`
 - [ ] Scheduled daily/weekly `backup.sh` (systemd timer or cron) - tool exists, schedule does not
 - [ ] Real-device phone pass (emulation only so far)
 - [ ] Migrate the 15 legacy `import anki` modules behind `CollectionGateway` (ratchet in test_architecture.py)

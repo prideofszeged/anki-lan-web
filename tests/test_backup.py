@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import stat
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,9 @@ def data_dir(tmp_path: Path) -> Path:
     (data / "backups" / "old.tar.gz").write_bytes(b"must not be re-archived")
     (data / "import-tmp").mkdir()
     (data / "import-tmp" / "scratch.apkg").write_bytes(b"temp")
+    (data / "tmp").mkdir()
+    (data / "tmp" / "tmp-stale.colpkg").write_bytes(b"large temporary export")
+    (data / ".maintenance.lock").write_text("do not archive")
     (data / "anki" / "ankiconnect.json").write_text('{"apiKey": "k"}')
     return data
 
@@ -37,13 +41,15 @@ def test_create_backup_writes_archive_and_sidecar(data_dir, tmp_path):
     assert archive.name == "anki-lan-web-20261003T170500Z.tar.gz"
     sidecar = Path(str(archive) + ".sha256")
     assert sidecar.read_text().split()[0] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
 def test_bundle_contents_exclude_scratch_and_other_backups(data_dir, tmp_path):
     names = _names(bk.create_backup(data_dir, tmp_path / "out", now=NOW))
     assert {"manifest.json", "acceptance-baseline.json", "anki/collection.anki2",
             "anki/collection.media/lt01.mp3", "anki/ankiconnect.json"} <= names
-    assert not any(n.startswith(("backups", "import-tmp")) for n in names)
+    assert not any(n.startswith(("backups", "import-tmp", "tmp", ".")) for n in names)
 
 
 def test_manifest_matches_spec_section_15(data_dir, tmp_path):

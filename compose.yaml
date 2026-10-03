@@ -17,10 +17,12 @@ services:
       ANKIWEB_IMPORT_TMP_DIR: /data/import-tmp
       ANKIWEB_HOST: 0.0.0.0
       ANKIWEB_PORT: 8000
-      ANKIWEB_ALLOWED_HOSTS: 127.0.0.1,localhost,192.168.1.7
-      ANKIWEB_SOURCE_URL: https://github.com/prideofszeged/anki-lan-web
+      ANKIWEB_ALLOWED_HOSTS: ${ANKIWEB_ALLOWED_HOSTS:-127.0.0.1,localhost,192.168.1.7}
+      ANKIWEB_SOURCE_URL: ${ANKIWEB_SOURCE_URL:-https://github.com/prideofszeged/anki-lan-web/tree/feat/modular-mobile-v1}
       ANKIWEB_SECURE_COOKIE: ${ANKIWEB_SECURE_COOKIE:-false}
-      TZ: America/New_York
+      ANKIWEB_INIT_COLLECTION: ${ANKIWEB_INIT_COLLECTION:-false}
+      TMPDIR: /data/tmp
+      TZ: ${TZ:-America/New_York}
     ports:
       - "127.0.0.1:18082:8000"
     volumes:
@@ -35,12 +37,21 @@ services:
     pids_limit: 256
     mem_limit: 768m
     cpus: 2.0
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # LAN HTTPS front (SPEC section 13). Opt-in: `docker compose --profile lan up -d`.
   # Binds ONE explicit LAN address, never 0.0.0.0. Pin the digest at cutover (T13).
   proxy:
     profiles: ["lan"]
-    image: caddy:2.8.4-alpine
+    build:
+      context: .
+      dockerfile: deploy/proxy/Dockerfile
+    image: local/anki-lan-proxy:2.8.4
     container_name: anki-lan-proxy
     restart: unless-stopped
     depends_on:
@@ -63,6 +74,12 @@ services:
       - ALL
     pids_limit: 128
     mem_limit: 128m
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   caddy-data:

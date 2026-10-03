@@ -17,18 +17,9 @@ _CSP = "frame-ancestors 'self'"
 _HSTS = "max-age=31536000"
 
 
-def _bare(netloc: str) -> str:
-    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
-
-
-def _same_origin(netloc: str, host: str, extra: tuple[str, ...]) -> bool:
+def _same_origin(netloc: str, host: str) -> bool:
     netloc = netloc.lower()
-    if not netloc:
-        return False
-    if netloc == host.lower():
-        return True
-    listed = {h.lower() for h in extra if h != "*"}
-    return netloc in listed or _bare(netloc) in listed
+    return bool(netloc) and netloc == host.lower()
 
 
 def origin_ok(method: str, headers: Mapping[str, str], host: str, extra: tuple[str, ...] = (),
@@ -47,10 +38,10 @@ def origin_ok(method: str, headers: Mapping[str, str], host: str, extra: tuple[s
         return False
     origin = headers.get("origin")
     if origin is not None:
-        return origin != "null" and _same_origin(urlsplit(origin).netloc, host, extra)
+        return origin != "null" and _same_origin(urlsplit(origin).netloc, host)
     referer = headers.get("referer")
     if referer:
-        return _same_origin(urlsplit(referer).netloc, host, extra)
+        return _same_origin(urlsplit(referer).netloc, host)
     return not has_session
 
 

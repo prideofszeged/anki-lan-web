@@ -171,7 +171,7 @@ def render_page(
         f"{links}"
         f"{scripts}"
         '<script src="/shell/static/bootstrap.js"></script>'
-        '<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/shell/static/sw.js")}</script>'
+        '<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"})}</script>'
         "</head>"
         f"<body data-context={json.dumps(context)}>{bar_html}{body}</body></html>"
     )

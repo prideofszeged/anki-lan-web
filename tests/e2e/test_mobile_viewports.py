@@ -314,6 +314,19 @@ def test_dark_mode_and_prefers_color_scheme(live_server_layout):
         nav_bg = page.evaluate("() => getComputedStyle(document.getElementById('ankiweb-bottomnav')).backgroundColor")
         # In dark mode, background should not be white rgb(255, 255, 255)
         assert nav_bg not in ("rgb(255, 255, 255)", "#ffffff")
+        contrast = page.locator("a.deck").first.evaluate(
+            """el => {
+              const rgb = s => (s.match(/[0-9.]+/g) || []).slice(0,3).map(Number);
+              const lum = c => {
+                const v = c.map(x => x / 255).map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4);
+                return .2126 * v[0] + .7152 * v[1] + .0722 * v[2];
+              };
+              const fg = lum(rgb(getComputedStyle(el).color));
+              const bg = lum(rgb(getComputedStyle(document.body).backgroundColor));
+              return (Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05);
+            }"""
+        )
+        assert contrast >= 4.5
 
         # 2. Night-mode class toggle
         context_light = browser.new_context(**p.devices["iPhone 13"], color_scheme="light")
@@ -328,6 +341,19 @@ def test_dark_mode_and_prefers_color_scheme(live_server_layout):
         page_light.wait_for_function("() => document.documentElement.classList.contains('night-mode')", timeout=5000)
         assert page_light.evaluate("() => document.documentElement.classList.contains('night-mode')")
 
+        browser.close()
+
+
+def test_add_chrome_does_not_cover_editor_on_phone(live_server_layout):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(**p.devices["iPhone 13"]).new_page()
+        page.goto(f"{live_server_layout}/add")
+        page.wait_for_selector(".note-editor", timeout=10000)
+        chrome = page.locator("#add-chrome").bounding_box()
+        editor = page.locator(".note-editor").bounding_box()
+        assert chrome and editor
+        assert editor["y"] >= chrome["y"] + chrome["height"] - 1
         browser.close()
 
 
@@ -500,4 +526,3 @@ def test_sveltekit_graphs_mobile_chrome_affordance(live_server_layout):
         d_context.close()
 
         browser.close()
-

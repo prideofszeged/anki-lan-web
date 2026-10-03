@@ -1,13 +1,15 @@
 from __future__ import annotations
+import asyncio
 import html
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from ankiweb.config import Settings, host_allowed
-from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, password_ok
+from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, login_client, password_ok
 from ankiweb.security import origin_ok, security_headers
 from ankiweb.api.v1 import PREFIX as API_PREFIX, PUBLIC_PATHS as API_PUBLIC, build_api_router
 
@@ -106,6 +108,8 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
     # --- specific routes FIRST, media catch-all LAST (Starlette matches in order) ---
     @app.get("/healthz")
     def healthz():
+        # Docker/Caddy liveness must remain responsive while the serialized collection
+        # worker is busy. Collection readiness lives at /api/v1/health/ready.
         return {"ok": True}
 
     @app.get("/login", response_class=HTMLResponse)
@@ -115,12 +119,14 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     @app.post("/login")
     async def login_submit(request: Request):
-        client = request.client.host if request.client else "unknown"
+        client = login_client(request)
         if not login_limiter.allow(client):
             return HTMLResponse(_login_html(error=True), status_code=429)
         form = await request.form()
-        if auth_enabled and password_ok(
-                form.get("password", ""), settings.password, settings.password_hash):
+        accepted = auth_enabled and await asyncio.to_thread(
+            password_ok, form.get("password", ""), settings.password, settings.password_hash)
+        if accepted:
+            login_limiter.reset(client)
             resp = RedirectResponse("/", status_code=303)
             resp.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",
                             secure=settings.secure_cookie, max_age=sessions.max_age)
@@ -139,6 +145,15 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     static_dir = settings.shell_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker():
+        return FileResponse(
+            static_dir / "sw.js",
+            media_type="application/javascript",
+            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+        )
+
     app.mount("/shell/static", StaticFiles(directory=str(static_dir), check_dir=False), name="shell")
 
     app.include_router(build_assets_router(settings.assets_dir))       # GET  /_anki/{path}
@@ -147,6 +162,7 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
         lambda: app.state.hub,
         settings.allowed_hosts,
         (lambda token: not auth_enabled or sessions.valid(token)),
+        auth_required=auth_enabled,
     ))  # WS /ws
     app.include_router(build_screen_router(lambda: app.state.service, lambda: app.state.notifier))  # GET / + /notify
     app.include_router(build_sveltekit_router(settings.assets_dir))     # GET  /graphs, /_app/{path}, /favicon.ico

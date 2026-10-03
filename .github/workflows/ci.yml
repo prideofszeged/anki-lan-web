@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -24,6 +25,9 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python tools/fetch_web_assets.py
       - run: npm ci && npm run build
+      - run: npm run typecheck
+      - name: Generated API client is current
+        run: npm run gen:api && git diff --exit-code -- packages/contracts/ts/api.ts
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest -q
 
@@ -34,3 +38,34 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build --tag anki-lan-web:test .
       - run: docker image inspect anki-lan-web:test
+      - name: Build and validate hardened LAN proxy
+        run: |
+          docker compose --profile lan build proxy
+          docker compose --profile lan run --rm --no-deps proxy \
+            caddy validate --config /etc/caddy/Caddyfile
+      - name: Container smoke and persistence
+        run: |
+          mkdir -p smoke-data
+          chmod 0777 smoke-data
+          docker run -d --name anki-smoke --read-only --tmpfs /tmp:size=128m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -e ANKIWEB_AUTH_DISABLED=1 -e ANKIWEB_INIT_COLLECTION=1 \
+            -v "$PWD/smoke-data:/data" anki-lan-web:test
+          for i in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' anki-smoke)" = healthy ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' anki-smoke)" = healthy
+          docker exec anki-smoke python -c \
+            "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready'))['status']=='ready'"
+          docker rm -f anki-smoke
+          docker run -d --name anki-smoke --read-only --tmpfs /tmp:size=128m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -e ANKIWEB_AUTH_DISABLED=1 -e ANKIWEB_INIT_COLLECTION=0 \
+            -v "$PWD/smoke-data:/data" anki-lan-web:test
+          for i in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' anki-smoke)" = healthy ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' anki-smoke)" = healthy
+          docker rm -f anki-smoke

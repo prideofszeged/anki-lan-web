@@ -5,7 +5,7 @@ from starlette.websockets import WebSocketDisconnect
 from ankiweb.config import Settings
 from ankiweb.app import create_app
 from ankiweb.auth import COOKIE
-from ankiweb.auth import SessionStore, password_ok
+from ankiweb.auth import LoginLimiter, SessionStore, password_ok
 
 
 def _client(tmp_path: Path, password: str = "") -> TestClient:
@@ -42,6 +42,39 @@ def test_login_wrong_password(tmp_path: Path):
         assert "password" in r.text.lower() or "密码" in r.text
 
 
+def test_login_rate_limit_counts_failures_not_successes(tmp_path: Path):
+    with _client(tmp_path, "secret") as c:
+        for _ in range(8):
+            assert c.post("/login", data={"password": "wrong"}).status_code == 401
+        assert c.post("/login", data={"password": "wrong"}).status_code == 429
+
+    with _client(tmp_path, "secret") as c:
+        for _ in range(12):
+            assert c.post("/login", data={"password": "secret"},
+                          headers={"Origin": "http://testserver"},
+                          follow_redirects=False).status_code == 303
+
+
+def test_limiter_reserves_each_attempt_before_verification():
+    limiter = LoginLimiter(attempts=2)
+    assert limiter.allow("phone")
+    assert limiter.allow("phone")
+    assert not limiter.allow("phone")
+    limiter.reset("phone")
+    assert limiter.allow("phone")
+
+
+def test_forwarded_clients_have_separate_login_buckets(tmp_path: Path):
+    with _client(tmp_path, "secret") as c:
+        for _ in range(8):
+            assert c.post("/login", data={"password": "wrong"},
+                          headers={"X-Forwarded-For": "192.168.1.10"}).status_code == 401
+        assert c.post("/login", data={"password": "wrong"},
+                      headers={"X-Forwarded-For": "192.168.1.10"}).status_code == 429
+        assert c.post("/login", data={"password": "wrong"},
+                      headers={"X-Forwarded-For": "192.168.1.11"}).status_code == 401
+
+
 def test_login_correct_unlocks(tmp_path: Path):
     with _client(tmp_path, "secret") as c:
         r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
@@ -76,8 +109,30 @@ def test_ws_rejected_without_cookie(tmp_path: Path):
 def test_ws_ok_with_cookie(tmp_path: Path):
     with _client(tmp_path, "secret") as c:
         c.post("/login", data={"password": "secret"})
-        with c.websocket_connect("/ws?context=browser"):
+        with c.websocket_connect("/ws?context=browser", headers={"Origin": "http://testserver"}):
             pass  # accepted, no rejection
+
+
+def test_ws_rejects_foreign_origin_with_session(tmp_path: Path):
+    with _client(tmp_path, "secret") as c:
+        c.post("/login", data={"password": "secret"})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with c.websocket_connect(
+                    "/ws?context=browser", headers={"Origin": "https://evil.example"}):
+                pass
+        assert exc.value.code == 1008
+
+
+def test_ws_session_is_rechecked_after_logout(tmp_path: Path):
+    with _client(tmp_path, "secret") as c:
+        c.post("/login", data={"password": "secret"})
+        with c.websocket_connect(
+                "/ws?context=browser", headers={"Origin": "http://testserver"}) as ws:
+            c.get("/logout", follow_redirects=False)
+            ws.send_json({"type": "ready"})
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
 
 
 def test_ws_open_when_no_password(tmp_path: Path):
@@ -99,3 +154,8 @@ def test_argon2_password_hash():
     encoded = PasswordHasher().hash("correct horse")
     assert password_ok("correct horse", password_hash=encoded)
     assert not password_ok("wrong", password_hash=encoded)
+
+
+def test_non_ascii_plaintext_password():
+    assert password_ok("κωδικός🔒", password="κωδικός🔒")
+    assert not password_ok("κωδικός", password="κωδικός🔒")

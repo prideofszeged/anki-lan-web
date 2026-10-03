@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ankiweb.adapters.anki.decks import AnkiDeckCatalog
 from ankiweb.application.decks import DeckService
-from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, password_ok
+from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, login_client, password_ok
 from ankiweb.config import Settings
 from ankiweb.domain.models import DeckCounts, DeckNode
 
@@ -106,12 +106,15 @@ def build_api_router(get_service: Callable, sessions: SessionStore, limiter: Log
 
     @router.post("/auth/login", status_code=204, tags=["session"])
     async def login(body: LoginBody, request: Request) -> Response:
-        client = request.client.host if request.client else "unknown"
-        if not limiter.allow(client):
+        client = login_client(request)
+        if auth_enabled and not limiter.allow(client):
             raise HTTPException(429, "too many attempts")
-        if auth_enabled and not password_ok(body.password, settings.password,
-                                            settings.password_hash):
-            raise HTTPException(401, "invalid credentials")
+        if auth_enabled:
+            accepted = await asyncio.to_thread(
+                password_ok, body.password, settings.password, settings.password_hash)
+            if not accepted:
+                raise HTTPException(401, "invalid credentials")
+            limiter.reset(client)
         resp = Response(status_code=204)
         if auth_enabled:
             resp.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",

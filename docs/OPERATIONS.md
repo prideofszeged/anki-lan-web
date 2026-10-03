@@ -12,6 +12,12 @@ The default Compose mapping is loopback-only at `http://127.0.0.1:18082`. This m
 pilot safe to test alongside another Anki service. LAN/Tailscale exposure is opt-in (see
 "LAN HTTPS"); do not publish the application port directly to the internet.
 
+An existing collection is required by default. For a deliberately empty first-time install,
+set `ANKIWEB_INIT_COLLECTION=true` for the first successful start, then remove it or set it back
+to `false`. This prevents a missing or incorrectly mounted data directory from looking like an
+empty-but-healthy Anki library. Large temporary imports and exports use `data/tmp/`, not the
+container's small in-memory `/tmp`.
+
 ## Authentication
 
 `python -m ankiweb` **refuses to start** without `ANKIWEB_PASSWORD` or `ANKIWEB_PASSWORD_HASH`
@@ -30,8 +36,9 @@ the app logs everyone out (ADR 0003).
 ```
 
 Checks the Compose model, container health, SQLite integrity, and reports collection and media
-counts. `GET /api/v1/health/live` and `/api/v1/health/ready` (collection open and worker
-responsive; 503 otherwise) are the machine-readable equivalents.
+counts. `GET /healthz` and `/api/v1/health/live` report process liveness without queueing behind
+long Anki work. `/api/v1/health/ready` checks that the collection worker is responsive (503
+otherwise).
 
 ## Acceptance checks (SPEC M1–M10)
 
@@ -62,7 +69,9 @@ The script briefly stops the app, writes `anki-lan-web-<UTC stamp>.tar.gz` plus 
 sidecar under `backups/` (override with `ANKIWEB_BACKUP_DIR`), applies retention, and restarts
 the app. The archive contains the data directory (without `backups/`, `import-tmp/`, `home/`),
 `manifest.json` (versions, counts, per-file SHA-256) and `acceptance-baseline.json`. It aborts if
-the collection changes while it is being read.
+the collection changes while it is being read. Archives and checksum sidecars are created with
+owner-only permissions (`0600`). Backup and verification scripts share a non-blocking maintenance
+lock so they cannot stop or inspect the collection concurrently.
 
 Retention is 7 daily, 4 weekly and 6 monthly backups (newest per bucket; the newest overall is
 always kept). Preview with:
@@ -106,8 +115,15 @@ are not changed by this repository. Export the CA root to trust it on owned devi
 docker compose cp proxy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
 ```
 
-Pin the Caddy image digest before cutover. The `Caddyfile` has not been syntax-checked in CI (no
-Caddy image is pulled there); run `docker run --rm -v "$PWD/deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine caddy validate --config /etc/caddy/Caddyfile` once before first use.
+The Caddy base image is pinned by digest. The small derived image removes an upstream binary
+capability that is unnecessary on port 18443, allowing the container to retain both
+`no-new-privileges` and a completely empty capability set. Build and validate it before first LAN
+use:
+
+```bash
+docker compose --profile lan build proxy
+docker compose --profile lan run --rm proxy caddy validate --config /etc/caddy/Caddyfile
+```
 
 ## Diagnosing a hung server
 

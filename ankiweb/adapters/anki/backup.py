@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import sys
 import tarfile
 import tempfile
@@ -30,7 +31,7 @@ from ankiweb.adapters.anki import acceptance
 from ankiweb.adapters.anki.acceptance import Check
 from ankiweb.application.retention import STAMP_FORMAT, parse_stamp, select_keep
 
-EXCLUDED_TOP_LEVEL = frozenset({"backups", "import-tmp", "home"})
+EXCLUDED_TOP_LEVEL = frozenset({"backups", "import-tmp", "home", "tmp"})
 MANIFEST = "manifest.json"
 BASELINE = "acceptance-baseline.json"
 COLLECTION_REL = "anki/collection.anki2"
@@ -55,7 +56,8 @@ def _data_files(data_dir: Path) -> list[Path]:
     files = []
     for path in sorted(data_dir.rglob("*")):
         rel = path.relative_to(data_dir)
-        if path.is_file() and rel.parts[0] not in EXCLUDED_TOP_LEVEL:
+        if (path.is_file() and rel.parts[0] not in EXCLUDED_TOP_LEVEL
+                and not rel.parts[0].startswith(".")):
             files.append(path)
     return files
 
@@ -103,10 +105,14 @@ def create_backup(data_dir: Path, out_dir: Path, *, now: datetime | None = None)
             _add_bytes(tf, BASELINE, (json.dumps(snap, indent=2, sort_keys=True) + "\n").encode(), now)
             for path in files:
                 tf.add(path, arcname=path.relative_to(data_dir).as_posix(), recursive=False)
+        partial.chmod(0o600)
         partial.replace(archive)
     finally:
         partial.unlink(missing_ok=True)
-    Path(str(archive) + ".sha256").write_text(f"{_sha256_file(archive)}  {archive.name}\n")
+    archive.chmod(0o600)
+    sidecar = Path(str(archive) + ".sha256")
+    sidecar.write_text(f"{_sha256_file(archive)}  {archive.name}\n")
+    sidecar.chmod(0o600)
     return archive
 
 
@@ -184,6 +190,7 @@ def _report(checks: list[Check]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)
     ap = argparse.ArgumentParser(prog="ankiweb.adapters.anki.backup", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)

@@ -47,11 +47,23 @@ class Settings:
     # Explicit opt-out of the fail-closed startup check (see auth_error). Only for a server
     # that is already isolated (loopback/VPN); never the default.
     auth_disabled: bool = False
+    # Tests and embedded callers may create a collection intentionally. Environment-driven
+    # server startup defaults to fail-closed unless ANKIWEB_INIT_COLLECTION is explicit.
+    init_collection: bool = True
 
     def auth_error(self) -> str | None:
         """Why the server must refuse to start, or None. Fail closed: a LAN-reachable
         Anki collection without a password is never the implicit default (SPEC V8)."""
-        if self.auth_disabled or self.password_hash:
+        if self.password_hash:
+            try:
+                from argon2 import extract_parameters
+                params = extract_parameters(self.password_hash)
+                if not self.password_hash.startswith("$argon2id$") or params.time_cost < 1:
+                    raise ValueError("not Argon2id")
+            except Exception:
+                return "ANKIWEB_PASSWORD_HASH is not a valid Argon2id encoded hash"
+            return None
+        if self.auth_disabled:
             return None
         if not self.password:
             return ("no web password configured: set ANKIWEB_PASSWORD (or "
@@ -77,5 +89,7 @@ class Settings:
             secure_cookie=os.environ.get("ANKIWEB_SECURE_COOKIE", "").lower()
             in ("1", "true", "yes", "on"),
             auth_disabled=os.environ.get("ANKIWEB_AUTH_DISABLED", "").lower()
+            in ("1", "true", "yes", "on"),
+            init_collection=os.environ.get("ANKIWEB_INIT_COLLECTION", "").lower()
             in ("1", "true", "yes", "on"),
         )

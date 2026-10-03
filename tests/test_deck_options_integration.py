@@ -42,7 +42,7 @@ def test_deck_options_spa_boots(live_server_dopts):
     url, did = live_server_dopts
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_context(bypass_csp=True).new_page()
+        page = browser.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("requestfailed",
@@ -50,8 +50,7 @@ def test_deck_options_spa_boots(live_server_dopts):
         posts = []
         page.on("request", lambda r: posts.append(r.url) if r.method == "POST" and "/_anki/" in r.url else None)
         page.goto(f"{url}/deck-options/{did}")
-        page.wait_for_function("document.querySelectorAll('input,button').length>3", timeout=10000)
-        page.wait_for_function("document.body.innerText.length>50", timeout=10000)
+        page.wait_for_selector("input:visible", timeout=10000)
         assert not errors, errors
         assert any("get_deck_configs_for_update" in u or "getDeckConfigsForUpdate" in u
                    for u in posts), posts

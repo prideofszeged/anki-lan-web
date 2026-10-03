@@ -1,4 +1,6 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 import pytest
 from fastapi.testclient import TestClient
 from ankiweb.config import Settings
@@ -76,6 +78,57 @@ def test_export_colpkg_then_collection_still_usable(client):
     # the service must have revived it.
     count = client.portal.call(client.app.state.service.run, lambda col: col.card_count())
     assert count == 2
+
+
+def test_failed_colpkg_export_reopens_collection(client, monkeypatch):
+    from anki.collection import Collection
+
+    _seed(client)
+
+    def fail_after_close(col, *_args, **_kwargs):
+        col.close()
+        raise OSError("simulated full temp volume")
+
+    monkeypatch.setattr(Collection, "export_collection_package", fail_after_close)
+    r = client.post("/export", data={"fmt": "colpkg", "with_media": "on"})
+    assert r.status_code == 500
+    assert "simulated full temp volume" in r.text
+    count = client.portal.call(client.app.state.service.run, lambda col: col.card_count())
+    assert count == 2
+    assert client.get("/healthz").status_code == 200
+
+
+def test_liveness_stays_up_while_collection_readiness_fails(client):
+    client.portal.call(client.app.state.service.run, lambda col: col.close())
+    assert client.get("/healthz").status_code == 200
+    ready = client.get("/api/v1/health/ready")
+    assert ready.status_code == 503 and ready.json() == {"status": "unavailable"}
+
+
+def test_requests_queued_during_colpkg_export_see_reopened_collection(
+        client, monkeypatch, tmp_path):
+    from anki.collection import Collection
+
+    _seed(client)
+    started, release = Event(), Event()
+    original = Collection.export_collection_package
+
+    def slow_export(col, *args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return original(col, *args, **kwargs)
+
+    monkeypatch.setattr(Collection, "export_collection_package", slow_export)
+    service = client.app.state.service
+    out = tmp_path / "queued.colpkg"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        exporting = pool.submit(
+            client.portal.call, service.export_collection_package, str(out), False, True)
+        assert started.wait(5)
+        queued = pool.submit(client.portal.call, service.run, lambda col: col.card_count())
+        release.set()
+        exporting.result(timeout=10)
+        assert queued.result(timeout=10) == 2
 
 
 def test_deckbrowser_has_export_link(client):

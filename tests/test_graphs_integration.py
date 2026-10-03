@@ -42,14 +42,13 @@ def live_server_graphs(tmp_path: Path):
 
 def test_graphs_spa_boots(live_server_graphs):
     with sync_playwright() as p:
-        browser = p.chromium.launch(); page = browser.new_context(bypass_csp=True).new_page()
+        browser = p.chromium.launch(); page = browser.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("requestfailed",
                 lambda r: errors.append("REQFAIL " + r.url) if ("/_app/" in r.url or "/_anki/" in r.url) else None)
         page.goto(f"{live_server_graphs}/graphs")
         page.wait_for_selector(".graphs-container", timeout=10000)
-        page.wait_for_function(
-            "document.querySelectorAll('.graphs-container svg').length>=1", timeout=10000)
+        page.wait_for_selector(".graphs-container svg", timeout=10000)
         assert not errors, errors
         browser.close()

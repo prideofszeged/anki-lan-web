@@ -1,7 +1,9 @@
 from __future__ import annotations
 import asyncio
 import faulthandler
+import os
 import signal
+from pathlib import Path
 import uvicorn
 from ankiweb.config import Settings
 from ankiweb.collection_service import CollectionService
@@ -25,6 +27,15 @@ async def _serve() -> None:
     settings = Settings.from_env()
     if (problem := settings.auth_error()):
         raise SystemExit(f"refusing to start: {problem}")
+    settings.import_tmp_dir.mkdir(parents=True, exist_ok=True)
+    if tmpdir := os.environ.get("TMPDIR"):
+        tmp_path = Path(tmpdir)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        # Exports use tempfile's `tmp*` names. Remove only our stale regular files;
+        # TMPDIR is configurable and may contain unrelated content.
+        for stale in tmp_path.glob("tmp*"):
+            if stale.is_file() or stale.is_symlink():
+                stale.unlink(missing_ok=True)
     ac_config = AnkiConnectConfig.load(settings.collection_path.parent / "ankiconnect.json")
     service = CollectionService(settings)
     await service.open()

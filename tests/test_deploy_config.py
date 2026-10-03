@@ -45,7 +45,10 @@ def test_proxy_is_locked_down():
     assert proxy["cap_drop"] == ["ALL"]
     assert not proxy.get("cap_add")          # listens on 18443 (unprivileged), needs nothing back
     assert not any("docker.sock" in str(v) for v in proxy.get("volumes", []))
-    assert proxy["image"].count(":") == 1 and not proxy["image"].endswith(":latest")
+    assert proxy["image"] == "local/anki-lan-proxy:2.8.4"
+    dockerfile = (ROOT / "deploy/proxy/Dockerfile").read_text()
+    assert "FROM caddy:2.8.4-alpine@sha256:" in dockerfile
+    assert "caddy-unprivileged" in dockerfile
 
 
 def test_proxy_waits_for_a_healthy_app():
@@ -64,6 +67,9 @@ def test_caddyfile_preserves_host_and_uses_internal_ca():
     text = (ROOT / "deploy/proxy/Caddyfile").read_text()
     assert "tls internal" in text
     assert "reverse_proxy app:8000" in text
+    assert "bind 0.0.0.0" in text  # container interface; host binding is restricted by Compose
+    assert "default_sni {$ANKIWEB_LAN_HOST:192.168.1.7}" in text
+    assert "health_headers" in text and "Host localhost" in text
     assert "header_up Host" not in text          # Origin check compares against the real Host
     assert "admin off" in text
 
@@ -94,3 +100,9 @@ def test_restore_drill_scratch_dir_is_not_under_tmp():
     line = next(l for l in text.splitlines() if l.startswith("scratch="))
     assert "mktemp -d" in line and ("${drill_tmp}" in line or "ANKIWEB_DRILL_TMP" in line), line
     assert "ANKIWEB_DRILL_TMP" in text
+
+
+def test_restore_drill_points_tempfile_at_its_writable_scratch_mount():
+    text = (ROOT / "scripts/restore-drill.sh").read_text()
+    assert '-v "${scratch}:/tmp"' in text
+    assert "-e HOME=/tmp -e TMPDIR=/tmp" in text

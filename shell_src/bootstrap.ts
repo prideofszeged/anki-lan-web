@@ -16,7 +16,10 @@ const SPA_NIGHT_PREFIXES = [
   "/import-csv", "/import-anki-package", "/image-occlusion",
 ];
 function nightOn(): boolean {
-  return location.hash.includes("night") || localStorage.getItem("ankiweb-night") === "1";
+  if (location.hash.includes("night")) return true;
+  const saved = localStorage.getItem("ankiweb-night");
+  if (saved !== null) return saved === "1";
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches === true;
 }
 function withNight(url: string): string {
   if (!nightOn() || url.includes("#")) return url;
@@ -116,7 +119,7 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 (window as any).ankiwebToggleNight = () => {
-  const on = localStorage.getItem("ankiweb-night") === "1";
+  const on = nightOn();
   localStorage.setItem("ankiweb-night", on ? "0" : "1");
   location.reload();
 };

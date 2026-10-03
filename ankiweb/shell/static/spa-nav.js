@@ -1,6 +1,9 @@
 (function() {
   function isNight() {
-    return location.hash.includes("night") || localStorage.getItem("ankiweb-night") === "1";
+    if (location.hash.includes("night")) return true;
+    var saved = localStorage.getItem("ankiweb-night");
+    if (saved !== null) return saved === "1";
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   }
 
   function updateNight() {

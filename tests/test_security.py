@@ -74,12 +74,21 @@ def test_origin_must_match_host_not_just_be_local(tmp_path: Path):
         assert r.status_code == 403
 
 
-def test_listed_allowed_host_origin_accepted(tmp_path: Path):
+def test_origin_must_match_current_host_even_when_both_hosts_are_allowed(tmp_path: Path):
     with _client(tmp_path, allowed_hosts=("anki.lan",)) as c:
         _login(c)
         r = c.post(MUTATE, data={}, headers={"Origin": "https://anki.lan"},
                    follow_redirects=False)
-        assert r.status_code != 403
+        assert r.status_code == 403
+
+
+def test_allowed_host_accepts_its_own_origin(tmp_path: Path):
+    settings = Settings(collection_path=tmp_path / "c.anki2", password="secret",
+                        allowed_hosts=("anki.lan",))
+    with TestClient(create_app(settings), base_url="https://anki.lan") as c:
+        r = c.post("/login", data={"password": "secret"},
+                   headers={"Origin": "https://anki.lan"}, follow_redirects=False)
+        assert r.status_code == 303
 
 
 def test_get_requests_not_origin_checked(tmp_path: Path):
@@ -142,8 +151,17 @@ def test_auth_error_for_placeholder_password(tmp_path: Path):
 
 
 def test_no_auth_error_with_password_or_hash(tmp_path: Path):
+    from argon2 import PasswordHasher
     assert Settings(collection_path=tmp_path / "c", password="a-real-secret").auth_error() is None
-    assert Settings(collection_path=tmp_path / "c", password_hash="$argon2id$x").auth_error() is None
+    assert Settings(
+        collection_path=tmp_path / "c",
+        password_hash=PasswordHasher().hash("secret"),
+    ).auth_error() is None
+
+
+def test_invalid_argon2_hash_is_rejected_at_startup(tmp_path: Path):
+    problem = Settings(collection_path=tmp_path / "c", password_hash="$argon2id$x").auth_error()
+    assert problem and "valid Argon2id" in problem
 
 
 def test_auth_error_cleared_by_explicit_opt_out(tmp_path: Path):
