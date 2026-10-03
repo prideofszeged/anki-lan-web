@@ -24,13 +24,16 @@ def build_router(get_hub, allowed_hosts=(), cookie_valid=lambda _token: True) ->
         try:
             while True:
                 # Malformed-frame hardening: a bad-JSON frame, a non-object payload, a
-                # missing field, or a handler error must NOT drop the live socket.
+                # missing field, or a handler error must NOT drop the live socket. Only
+                # *frame-content* errors are skipped: receive_json() on a socket that is already
+                # gone raises RuntimeError (WebSocketDisconnected, which is NOT a
+                # WebSocketDisconnect) without ever yielding, so swallowing it with a blanket
+                # `continue` is a hot loop that starves the whole event loop (observed: container
+                # pinned at 100% CPU, /healthz timing out). Anything else ends the session.
                 try:
                     msg = await websocket.receive_json()
-                except WebSocketDisconnect:
-                    raise
-                except Exception:
-                    continue  # malformed JSON frame — skip, keep the connection alive
+                except (ValueError, KeyError, TypeError):
+                    continue  # malformed frame (bad JSON, binary/missing payload) — skip it
                 if not isinstance(msg, dict):
                     continue
                 mtype = msg.get("type")
@@ -48,8 +51,8 @@ def build_router(get_hub, allowed_hosts=(), cookie_valid=lambda _token: True) ->
                         hub.resolve(mid, msg.get("value"))
                 elif mtype == "ready":
                     pass  # domDone handshake; per-screen logic handles buffering
-        except WebSocketDisconnect:
-            pass
+        except (WebSocketDisconnect, RuntimeError):
+            pass  # client left, or the socket was already torn down (e.g. failed broadcast send)
         finally:
             hub.unregister(context, websocket)
 

@@ -27,7 +27,13 @@ class BridgeHub:
 
     async def _send_all(self, ctx: str, msg: dict) -> None:
         for ws in list(self._conns.get(ctx, [])):
-            await ws.send_json(msg)
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                # A closed tab (navigation, sleep, network drop) must not abort delivery to the
+                # other sockets or bubble into the collection's change callback. Drop it so it is
+                # not retried on every later broadcast; its receive loop ends on its own.
+                self.unregister(ctx, ws)
 
     async def push_call(self, ctx: str, fn: str, args: list) -> None:
         await self._send_all(ctx, {"type": "call", "id": None, "fn": fn, "args": args})
