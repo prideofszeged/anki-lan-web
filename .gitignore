@@ -7,11 +7,13 @@ build/
 *.egg
 .venv/
 venv/
+.env
+backups/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 ankiweb/web_assets/
-ankiweb/shell/static/
+ankiweb/shell/static/bootstrap.js
 node_modules/
 *.anki2
 

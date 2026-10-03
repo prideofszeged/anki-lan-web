@@ -98,9 +98,9 @@ def test_browser_routes_io_note_to_io_editor(client):
         assert "/image-occlusion/" in m["args"][0]
         ws.send_json({"type": "cmd", "id": None, "ctx": "browser", "arg": f"select:{normal_cid}"})
         m = ws.receive_json()
-        while not (m["type"] == "call" and m["fn"] == "ankiwebSetDetail"):
+        while not (m["type"] == "call" and m["fn"] == "ankiwebEditNote"):
             m = ws.receive_json()
-        assert "/edit?nid=" in m["args"][0]
+        assert isinstance(m["args"][0], int)
 
 
 def test_deckbrowser_has_image_occlusion_button(client):

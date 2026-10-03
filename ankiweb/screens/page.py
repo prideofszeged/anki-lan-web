@@ -89,12 +89,18 @@ def render_page(
     return (
         "<!doctype html>\n"
         '<html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+        '<meta name="theme-color" content="#2563eb">'
+        '<link rel="manifest" href="/shell/static/manifest.webmanifest">'
+        '<link rel="icon" href="/shell/static/icon.svg" type="image/svg+xml">'
+        '<link rel="stylesheet" href="/shell/static/mobile.css">'
         f"<script>window.__ankiwebContext={json.dumps(context)}</script>"
         f"{_NIGHT_CSS}"
         f"{bar_css}"
         f"{links}"
         f"{scripts}"
         '<script src="/shell/static/bootstrap.js"></script>'
+        '<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/shell/static/sw.js")}</script>'
         "</head>"
         f"<body>{bar_html}{body}</body></html>"
     )

@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 from ankiweb.config import Settings, host_allowed
-from ankiweb.auth import COOKIE, auth_token, cookie_ok, password_ok
+from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, password_ok
 
 
 def _login_html(error: bool = False) -> str:
@@ -42,6 +42,9 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
                hub: BridgeHub | None = None, notifier=None) -> FastAPI:
     settings = settings or Settings.from_env()
     owns = service is None
+    sessions = SessionStore()
+    login_limiter = LoginLimiter()
+    auth_enabled = bool(settings.password or settings.password_hash)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -76,8 +79,8 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
     async def auth_guard(request, call_next):
         # Open by default; only gates when ANKIWEB_PASSWORD is set. /login, /logout, /healthz
         # stay reachable so an unauthenticated user can reach the login form.
-        if settings.password and request.url.path not in ("/login", "/logout", "/healthz"):
-            if not cookie_ok(request.cookies.get(COOKIE), settings.password):
+        if auth_enabled and request.url.path not in ("/login", "/logout", "/healthz"):
+            if not sessions.valid(request.cookies.get(COOKIE)):
                 return RedirectResponse("/login", status_code=303)
         return await call_next(request)
 
@@ -95,16 +98,21 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     @app.post("/login")
     async def login_submit(request: Request):
+        client = request.client.host if request.client else "unknown"
+        if not login_limiter.allow(client):
+            return HTMLResponse(_login_html(error=True), status_code=429)
         form = await request.form()
-        if settings.password and password_ok(form.get("password", ""), settings.password):
+        if auth_enabled and password_ok(
+                form.get("password", ""), settings.password, settings.password_hash):
             resp = RedirectResponse("/", status_code=303)
-            resp.set_cookie(COOKIE, auth_token(settings.password),
-                            httponly=True, samesite="lax", max_age=30 * 86400)
+            resp.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",
+                            secure=settings.secure_cookie, max_age=sessions.max_age)
             return resp
         return HTMLResponse(_login_html(error=True), status_code=401)
 
     @app.get("/logout")
-    def logout():
+    def logout(request: Request):
+        sessions.revoke(request.cookies.get(COOKIE))
         resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie(COOKIE)
         return resp
@@ -115,7 +123,11 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     app.include_router(build_assets_router(settings.assets_dir))       # GET  /_anki/{path}
     app.include_router(build_rpc_router(lambda: app.state.service, lambda: app.state.hub))    # POST /_anki/{method}
-    app.include_router(build_ws_router(lambda: app.state.hub, settings.allowed_hosts, settings.password))  # WS /ws
+    app.include_router(build_ws_router(
+        lambda: app.state.hub,
+        settings.allowed_hosts,
+        (lambda token: not auth_enabled or sessions.valid(token)),
+    ))  # WS /ws
     app.include_router(build_screen_router(lambda: app.state.service, lambda: app.state.notifier))  # GET / + /notify
     app.include_router(build_sveltekit_router(settings.assets_dir))     # GET  /graphs, /_app/{path}, /favicon.ico
     app.include_router(build_media_router(lambda: app.state.service))  # GET  /{path} — LAST

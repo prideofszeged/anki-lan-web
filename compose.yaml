@@ -1,0 +1,37 @@
+name: anki-lan-web
+
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: local/anki-lan-web:26.09.3
+    container_name: anki-lan-web
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ANKIWEB_COLLECTION: /data/anki/collection.anki2
+      ANKIWEB_IMPORT_TMP_DIR: /data/import-tmp
+      ANKIWEB_HOST: 0.0.0.0
+      ANKIWEB_PORT: 8000
+      ANKIWEB_ALLOWED_HOSTS: 127.0.0.1,localhost,192.168.1.7
+      ANKIWEB_SOURCE_URL: https://github.com/prideofszeged/anki-lan-web
+      ANKIWEB_SECURE_COOKIE: "false"
+      TZ: America/New_York
+    ports:
+      - "127.0.0.1:18082:8000"
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 768m
+    cpus: 2.0

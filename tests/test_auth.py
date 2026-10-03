@@ -4,7 +4,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from ankiweb.config import Settings
 from ankiweb.app import create_app
-from ankiweb.auth import COOKIE, auth_token
+from ankiweb.auth import COOKIE
+from ankiweb.auth import SessionStore, password_ok
 
 
 def _client(tmp_path: Path, password: str = "") -> TestClient:
@@ -45,7 +46,8 @@ def test_login_correct_unlocks(tmp_path: Path):
     with _client(tmp_path, "secret") as c:
         r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/"
-        assert r.cookies.get(COOKIE) == auth_token("secret")
+        assert r.cookies.get(COOKIE)
+        assert r.cookies.get(COOKIE) != "secret"
         # the client now carries the session cookie -> protected page loads
         assert c.get("/deckbrowser", follow_redirects=False).status_code == 200
 
@@ -73,7 +75,7 @@ def test_ws_rejected_without_cookie(tmp_path: Path):
 
 def test_ws_ok_with_cookie(tmp_path: Path):
     with _client(tmp_path, "secret") as c:
-        c.cookies.set(COOKIE, auth_token("secret"))
+        c.post("/login", data={"password": "secret"})
         with c.websocket_connect("/ws?context=browser"):
             pass  # accepted, no rejection
 
@@ -82,3 +84,18 @@ def test_ws_open_when_no_password(tmp_path: Path):
     with _client(tmp_path) as c:
         with c.websocket_connect("/ws?context=browser"):
             pass
+
+
+def test_sessions_are_random_and_revocable():
+    store = SessionStore()
+    first, second = store.create(), store.create()
+    assert first != second and store.valid(first) and store.valid(second)
+    store.revoke(first)
+    assert not store.valid(first) and store.valid(second)
+
+
+def test_argon2_password_hash():
+    from argon2 import PasswordHasher
+    encoded = PasswordHasher().hash("correct horse")
+    assert password_ok("correct horse", password_hash=encoded)
+    assert not password_ok("wrong", password_hash=encoded)

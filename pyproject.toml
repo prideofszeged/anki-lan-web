@@ -8,17 +8,17 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "LICENSES/*", "THIRD-PARTY-NOTICES.md"]
 authors = [{ name = "tsc", email = "xxj.tan@gmail.com" }]
 classifiers = [
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.12",
     "Framework :: FastAPI",
 ]
 dependencies = [
-    "anki==25.9.4",
+    "anki==26.9.3",
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "websockets>=12",  # uvicorn needs a WS library for real /ws connections (the bridge)
     "httpx>=0.27",
     "python-multipart>=0.0.9",  # FastAPI UploadFile (the /upload_media paste-image endpoint)
+    "argon2-cffi>=23.1",
 ]
 
 [project.optional-dependencies]

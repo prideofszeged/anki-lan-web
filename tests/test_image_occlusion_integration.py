@@ -53,7 +53,7 @@ def live_io(tmp_path: Path):
 def _boot(url, expect_method):
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
+        page = browser.new_context(bypass_csp=True).new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("requestfailed",

@@ -52,7 +52,7 @@ def test_editor_load_pushes_note(client):
         assert data["fonts"][0][0] and isinstance(data["fonts"][0][1], int)
         assert data["io"] is False
         assert data["tags"] == ["geo"]
-        assert "id" in data["meta"] and "modTime" in data["meta"]
+        assert "id" in data["meta"] and "mtimeSecs" in data["meta"]
 
 
 def test_editor_blur_saves_field(client):

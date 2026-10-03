@@ -42,7 +42,7 @@ def test_change_notetype_spa_boots(live_server_cnt):
     url, old = live_server_cnt
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
+        page = browser.new_context(bypass_csp=True).new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("requestfailed",

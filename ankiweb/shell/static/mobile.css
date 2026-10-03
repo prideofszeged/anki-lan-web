@@ -1,0 +1,119 @@
+:root {
+  color-scheme: light dark;
+  --surface: #ffffff;
+  --surface-soft: #f4f6f8;
+  --text: #17202a;
+  --muted: #667085;
+  --border: #d0d5dd;
+  --accent: #2563eb;
+  --danger: #c62828;
+  --nav-height: 58px;
+  --tap: 44px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--surface);
+  color: var(--text);
+  line-height: 1.45;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+button, input, select, textarea { font: inherit; }
+button, .but {
+  min-height: var(--tap);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 14px;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent), transparent 55%);
+  outline-offset: 2px;
+}
+a { color: var(--accent); }
+img, video { max-width: 100%; height: auto; }
+
+#ankiweb-toolbar {
+  min-height: var(--nav-height) !important;
+  height: auto !important;
+  gap: 8px !important;
+  padding: 7px max(10px, env(safe-area-inset-left)) !important;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+#ankiweb-toolbar::-webkit-scrollbar { display: none; }
+#ankiweb-toolbar > a,
+#ankiweb-toolbar .lbl {
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  white-space: nowrap;
+  border-radius: 9px;
+}
+#ankiweb-toolbar .nm { min-width: var(--tap); min-height: var(--tap); }
+body { padding-top: calc(var(--nav-height) + 12px) !important; }
+
+.decks { width: min(100%, 900px); border-collapse: collapse; }
+.decks td, .decks th { min-height: var(--tap); padding: 9px 7px !important; }
+.decks .decktd { text-align: left; }
+.decks a.deck { display: inline-block; min-height: 34px; padding: 7px 4px; }
+.dyn-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 18px 10px; }
+.dyn-buttons a { min-height: var(--tap); display: inline-flex; align-items: center; padding: 8px 12px; }
+
+#qa { width: min(100%, 900px); margin: 0 auto; padding: 20px 16px 150px; overflow-wrap: anywhere; }
+#ankiweb-answer {
+  position: fixed;
+  z-index: 1500;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px max(10px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--surface), transparent 4%);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+}
+.ansbut { width: min(100%, 560px); display: block; margin: 0 auto; background: var(--accent); color: white; }
+.ease-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; width: min(100%, 720px); margin: 0 auto; }
+.ease { min-width: 0; min-height: 58px; padding: 6px 3px; }
+.ease-label, .ease-ivl { display: block; overflow: hidden; text-overflow: ellipsis; }
+.ease-label { font-weight: 650; }
+.ease-ivl { color: var(--muted); font-size: .78rem; }
+#rev-actions { display: flex; gap: 7px; overflow-x: auto; padding: 8px 10px; }
+.rev-act { flex: 0 0 auto; }
+
+#browser-top { position: sticky; top: calc(var(--nav-height) + 1px); z-index: 500; background: var(--surface); }
+#browser-actions { display: flex; gap: 6px; overflow-x: auto; padding-top: 6px; }
+#browser-main { min-width: 0; }
+#results-wrap { min-width: 0; }
+.editor-frame { max-width: 100%; }
+
+@media (max-width: 639px) {
+  :root { --nav-height: 56px; }
+  #ankiweb-toolbar { top: auto !important; bottom: 0; padding-bottom: calc(6px + env(safe-area-inset-bottom)) !important; }
+  #ankiweb-toolbar .menu, #ankiweb-toolbar a[href='/about'], #ankiweb-toolbar a[href='/tools'], #ankiweb-toolbar a[href='/preferences'] { display: none; }
+  #ankiweb-toolbar .nm { margin-left: 0 !important; }
+  body { padding-top: 10px !important; padding-bottom: calc(var(--nav-height) + env(safe-area-inset-bottom) + 16px); }
+  #ankiweb-answer { bottom: calc(var(--nav-height) + env(safe-area-inset-bottom)); }
+  #qa { padding: 12px 12px 170px; min-height: 55vh; }
+  .ease-row { gap: 4px; }
+  .ease { font-size: .86rem; padding-inline: 2px; }
+  .decks th.count, .decks td.count { width: 40px; font-size: .82rem; }
+  .decks th:first-child { width: auto; }
+  .gears { width: 22px; height: 22px; }
+  #browser-top { top: 0; }
+  #browser-main { display: block !important; }
+  #sidebar { width: 100% !important; max-height: 28vh; overflow: auto; border-right: 0 !important; border-bottom: 1px solid var(--border); }
+  #results-wrap { max-height: 45vh !important; }
+  #search { width: 100% !important; min-height: var(--tap); }
+  .editor-frame { height: 62vh !important; }
+  textarea, input, select { max-width: 100%; font-size: 16px; }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --surface: #17191d; --surface-soft: #23262c; --text: #f1f3f5; --muted: #aab2bf; --border: #404650; --accent: #7aa7ff; }
+}

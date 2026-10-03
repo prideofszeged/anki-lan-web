@@ -35,12 +35,12 @@ def render_custom_study_html(col) -> str:
 
     # per-radio config: [label, default, suffix, min]
     cfg = {
-        1: [tr.custom_study_increase_todays_new_card_limit_by(), d.extend_new or 0, tr.custom_study_cards(), -9999],
-        2: [tr.custom_study_increase_todays_review_limit_by(), d.extend_review or 0, tr.custom_study_cards(), -9999],
+        1: [tr.custom_study_increase_todays_new_card_limit_by(), d.extend_new or 0, tr.custom_study_cards(count=2), -9999],
+        2: [tr.custom_study_increase_todays_review_limit_by(), d.extend_review or 0, tr.custom_study_cards(count=2), -9999],
         3: [tr.custom_study_review_cards_forgotten_in_last(), 1, tr.scheduling_days(), 1],
         4: [tr.custom_study_review_ahead_by(), 1, tr.scheduling_days(), 1],
         5: [tr.custom_study_preview_new_cards_added_in_the(), 1, tr.scheduling_days(), 1],
-        6: [tr.custom_study_select(), 100, tr.custom_study_cards_from_the_deck(), 1],
+        6: [tr.custom_study_select(), 100, tr.custom_study_cards_from_the_deck(count=2), 1],
     }
 
     body = f"""

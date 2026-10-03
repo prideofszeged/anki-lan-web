@@ -1,5 +1,25 @@
 # ankiweb
 
+This fork packages the project as **anki-lan-web**: a small, mobile-first, Docker-deployed
+personal Anki server. It pins the official Anki engine and matching browser assets, stores
+the collection on a bind mount, and runs without a desktop environment or VNC container.
+See [Architecture](docs/ARCHITECTURE.md), [Operations](docs/OPERATIONS.md), and the
+[implementation specification](SPEC.md).
+
+## Docker quick start
+
+```bash
+cp .env.example .env
+# replace change-me with a long password
+./scripts/pilot.sh
+```
+
+Open <http://127.0.0.1:18082>. The pilot binds to loopback by default, so it can run beside
+an existing Anki installation without exposing a new LAN service. Run `./scripts/verify.sh`
+to check health and collection integrity, and `./scripts/backup.sh` for a quiescent backup.
+The runtime image is roughly 75 MB of filesystem data (about 312 MB in Docker's displayed
+layer accounting), rather than a multi-gigabyte desktop container.
+
 > ⚠️ **Unofficial, personal, single-user project — not affiliated with Anki/Ankitects.**
 > This is an independent, community browser port of [Anki](https://apps.ankiweb.net),
 > intended to be run by **one user on their own machine**. It is **NOT** affiliated with,
@@ -56,7 +76,7 @@ card-template editors (one of the Tools-menu screens ankiweb rebuilds for the we
 ## Requirements
 
 - Python **3.12**
-- `anki==25.9.4` (pinned — the vendored frontend must match this version; the exact upstream
+- `anki==26.9.3` (pinned — the vendored frontend must match this version; the exact upstream
   Anki/AnkiConnect commits this port was built against are recorded in [UPSTREAM.md](UPSTREAM.md))
 - Node.js (only to build the ~2 KB shell bundle)
 - A conda env is recommended: installing `anki` pulls a newer `protobuf` that can clash
@@ -68,7 +88,7 @@ card-template editors (one of the Tools-menu screens ankiweb rebuilds for the we
 conda create -n ankiweb python=3.12 -y
 conda run -n ankiweb pip install -e ".[dev]"
 
-# 1. Vendor Anki's compiled frontend (downloads the aqt 25.9.4 wheel, extracts
+# 1. Vendor Anki's compiled frontend (downloads the aqt 26.9.3 wheel, extracts
 #    _aqt/data/web/ into ankiweb/web_assets/ — gitignored). Required.
 conda run -n ankiweb python tools/fetch_web_assets.py
 
@@ -111,6 +131,8 @@ All settings have safe localhost defaults; override via environment variables:
 | `ANKIWEB_IMPORT_TMP_DIR` | `<collection dir>/import-tmp` | Where uploaded import/image files are staged before the backend reads them. |
 | `ANKIWEB_LANG` | *(empty → English)* | UI language, an Anki locale code (e.g. `zh-CN`, `ja`, `de`, `fr`). Chosen at startup — there is no in-app switcher; changing it means changing this var and restarting. See **Language** below. |
 | `ANKIWEB_PASSWORD` | *(empty → no password)* | If set, the web UI requires this password (a `/login` page sets a session cookie). Empty = open, the default. The AnkiConnect API keeps its own `ANKIWEB_AC_KEY`. |
+| `ANKIWEB_PASSWORD_HASH` | *(empty)* | Optional Argon2id password hash. When set, it takes precedence over `ANKIWEB_PASSWORD`, so the plaintext password does not need to be stored in the environment. |
+| `ANKIWEB_SECURE_COOKIE` | `false` | Set to `true` when clients reach the service over HTTPS. Adds the browser's `Secure` flag to the session cookie. |
 | `ANKIWEB_SOURCE_URL` | *(empty)* | AGPL §13 Corresponding-Source location for this deployment, shown on the `/about` page (only relevant if you run it as a public network service). |
 
 **`ankiconnect.json`** (optional) lives next to the collection file and uses AnkiConnect's
@@ -158,10 +180,12 @@ password, set `ANKIWEB_PASSWORD`:
 ANKIWEB_PASSWORD=mysecret conda run -n ankiweb python -m ankiweb
 ```
 
-Visitors then get a `/login` page; the correct password sets an httponly session cookie and
-unlocks the UI (and the `/ws` bridge). `/logout` clears it. This gates the **web app only**;
+Visitors then get a `/login` page; the correct password sets a random, httponly, Strict
+SameSite session cookie and unlocks the UI (and the `/ws` bridge). Sessions live server-side,
+expire after 30 days, and are invalidated by a container restart. `/logout` revokes the
+current session. Login attempts are rate-limited. This gates the **web app only**;
 the AnkiConnect HTTP API (port 8765) is controlled separately by `ANKIWEB_AC_KEY`. It's a
-light gate for LAN use, not a hardened auth system — serve over HTTPS if it matters.
+serve over HTTPS and set `ANKIWEB_SECURE_COOKIE=true` outside a trusted LAN.
 
 ### API docs (Swagger)
 
@@ -317,7 +341,7 @@ the GPL-3.0 text covering the AnkiConnect-derived code is in
 Because ankiweb is a network service, every user interacting with it over a network is
 entitled to its Corresponding Source. The running app exposes a **Source** link (the top
 toolbar → `/about`). Set **`ANKIWEB_SOURCE_URL`** to where your deployed source lives so that
-link points at the exact running version; the pinned Anki/aqt 25.9.4 source is at
+link points at the exact running version; the pinned Anki/aqt 26.9.3 source is at
 <https://github.com/ankitects/anki> and AnkiConnect at <https://github.com/FooSoft/anki-connect>.
 
 Copyright (C) 2026 tsc. Anki © Ankitects Pty Ltd and contributors. AnkiConnect © 2016–2021

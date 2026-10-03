@@ -2,7 +2,12 @@ from __future__ import annotations
 import html
 import json
 from ankiweb.i18n import tr
-from ankiweb.screens.editor import _munge, paste_handler_js, editor_links_js
+from ankiweb.screens.editor import (
+    _munge,
+    editor_links_js,
+    editor_state_payload,
+    paste_handler_js,
+)
 from ankiweb.ankiconnect.actions._helpers import check_addable
 from ankiweb.collection_service import op_changes_to_flags
 
@@ -20,15 +25,7 @@ _STYLE = (
 def _empty_load(col, ntid: int) -> dict:
     model = col.models.get(ntid)
     flds = model["flds"]
-    return {
-        "fields": [[f["name"], ""] for f in flds],
-        "fonts": [[f.get("font", "Arial"), int(f.get("size", 20)), bool(f.get("rtl", False))]
-                  for f in flds],
-        "io": False,
-        "noteId": 0,
-        "meta": {"id": model["id"], "modTime": model.get("mod", 0)},
-        "tags": [],
-    }
+    return editor_state_payload(col, model, [[f["name"], ""] for f in flds], [], 0)
 
 
 def load_data_for_spec(col, note_spec) -> dict | None:
@@ -61,7 +58,7 @@ def add_page_body(deck_opts: str, nt_opts: str) -> str:
         f"<a href='/deckbrowser'>{tr.actions_close()}</a><span id='add-toast'></span>"
         "</div>"
         "<script>(function(){"
-        "window.setupEditor('add');"
+        "window.setupEditor('add',true);"
         "var _nt=document.getElementById('add-notetype');"
         "if(_nt)window.__ankiwebNotetypeId=_nt.value;"
         "var b=window.__ankiwebBridge;"
@@ -74,8 +71,15 @@ def add_page_body(deck_opts: str, nt_opts: str) -> str:
         "window.ankiwebAddNote=function(){window.pycmd('addnote:'+JSON.stringify(readAllFields()));};"
         "b.registerCalls({"
         "ankiwebLoadNote:function(d){require('anki/ui').loaded.then(function(){"
-        "window.setFields(d.fields);window.setIsImageOcclusion(d.io);window.setFonts(d.fonts);"
-        "window.setNotetypeMeta(d.meta);window.setNoteId(d.noteId);window.setTags(d.tags);"
+        "var names=d.fields.map(function(f){return f[0];});"
+        "var values=d.fields.map(function(f){return f[1];});"
+        "window.setNotetypeMeta(d.meta);"
+        "window.setFields(names,values);window.setIsImageOcclusion(d.io);window.setFonts(d.fonts);"
+        "window.setCollapsed(d.collapsed);window.setClozeFields(d.clozeFields);"
+        "window.setPlainTexts(d.plainTexts);window.setDescriptions(d.descriptions);"
+        "window.setNoteId(d.noteId);window.setTags(d.tags);"
+        "window.setTagsCollapsed(false);window.setMathjaxEnabled(d.mathjax);"
+        "window.setShrinkImages(d.shrinkImages);window.setCloseHTMLTags(d.closeHtmlTags);"
         "window.triggerChanges();});},"
         "ankiwebToast:function(m){var t=document.getElementById('add-toast');if(t){"
         "t.textContent=String(m);setTimeout(function(){t.textContent='';},2000);}}"
