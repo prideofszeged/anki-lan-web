@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
+# Quiescent backup: stop the app, write a verified bundle (tar.gz + manifest + sha256 sidecar),
+# apply 7 daily / 4 weekly / 6 monthly retention, restart the app. Requires an image built from
+# this tree (`docker compose build app`) since the tool ships inside the image.
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 backup_dir="${ANKIWEB_BACKUP_DIR:-${repo_dir}/backups}"
-stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-archive="${backup_dir}/anki-lan-web-${stamp}.tar.gz"
 
 mkdir -p "${backup_dir}"
+backup_dir="$(cd "${backup_dir}" && pwd)"
 cd "${repo_dir}"
 
 was_running="$(docker compose ps --status running --services | grep -Fx app || true)"
@@ -21,6 +23,7 @@ restart_app() {
 }
 trap restart_app EXIT
 
-tar -czf "${archive}" data
-sha256sum "${archive}" > "${archive}.sha256"
-echo "${archive}"
+tool=(docker compose run --rm --no-deps -T -v "${backup_dir}:/backups" --entrypoint python app
+      -m ankiweb.adapters.anki.backup)
+"${tool[@]}" create --data /data --out /backups
+"${tool[@]}" prune --out /backups
