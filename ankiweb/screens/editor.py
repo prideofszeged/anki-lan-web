@@ -98,7 +98,11 @@ def editor_links_js() -> str:
 def editor_page_body(nid: int) -> str:
     return (
         f"<script>window.__ankiwebEditNid={int(nid)}</script>"
+        "<div id='editor-save-bar' style='display:none'>"
+        "<button type='button' id='save-btn' class='but' onclick='window.ankiwebSaveNote()'>Save</button>"
+        "</div>"
         "<script>(function(){"
+        "window.ankiwebSaveNote=function(){if(document.activeElement&&document.activeElement.blur){document.activeElement.blur();}};"
         "window.setupEditor('browser',true);"
         "var b=window.__ankiwebBridge;"
         "b.registerCalls({ankiwebLoadNote:function(d){"

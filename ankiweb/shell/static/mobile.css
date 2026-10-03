@@ -7,43 +7,77 @@
   --border: #d0d5dd;
   --accent: #2563eb;
   --danger: #c62828;
-  --nav-height: 58px;
+  --nav-height: 56px;
   --tap: 44px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #17191d;
+    --surface-soft: #23262c;
+    --text: #f1f3f5;
+    --muted: #aab2bf;
+    --border: #404650;
+    --accent: #7aa7ff;
+  }
+}
+
+html.night-mode {
+  --surface: #17191d;
+  --surface-soft: #23262c;
+  --text: #f1f3f5;
+  --muted: #aab2bf;
+  --border: #404650;
+  --accent: #7aa7ff;
+}
+
 * { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; }
+html, body {
+  margin: 0;
+  min-height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   background: var(--surface);
   color: var(--text);
   line-height: 1.45;
-  padding-bottom: env(safe-area-inset-bottom);
 }
+
 button, input, select, textarea { font: inherit; }
 button, .but {
   min-height: var(--tap);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 9px 14px;
+  padding: 8px 14px;
   background: var(--surface-soft);
   color: var(--text);
+  box-sizing: border-box;
 }
+
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--accent), transparent 55%);
   outline-offset: 2px;
 }
-a { color: var(--accent); }
-img, video { max-width: 100%; height: auto; }
 
+a { color: var(--accent); }
+img, video, canvas, iframe { max-width: 100%; height: auto; }
+
+/* Top toolbar */
 #ankiweb-toolbar {
-  min-height: var(--nav-height) !important;
+  min-height: 38px;
   height: auto !important;
-  gap: 8px !important;
-  padding: 7px max(10px, env(safe-area-inset-left)) !important;
+  gap: 12px !important;
+  padding: 0 max(12px, env(safe-area-inset-left)) !important;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scrollbar-width: none;
+  box-sizing: border-box;
+  background: var(--surface-soft) !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--text) !important;
 }
 #ankiweb-toolbar::-webkit-scrollbar { display: none; }
 #ankiweb-toolbar > a,
@@ -54,66 +88,504 @@ img, video { max-width: 100%; height: auto; }
   padding: 0 10px;
   white-space: nowrap;
   border-radius: 9px;
+  color: var(--text) !important;
 }
-#ankiweb-toolbar .nm { min-width: var(--tap); min-height: var(--tap); }
-body { padding-top: calc(var(--nav-height) + 12px) !important; }
+#ankiweb-toolbar .nm {
+  min-width: var(--tap);
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
-.decks { width: min(100%, 900px); border-collapse: collapse; }
+/* Bottom navigation bar */
+#ankiweb-bottomnav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-around;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  min-height: calc(52px + env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
+}
+
+#ankiweb-bottomnav .tab-item {
+  flex: 1 1 0;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 5px 2px;
+  color: var(--muted);
+  text-decoration: none;
+  background: transparent;
+  border: 0;
+  font-size: 0.75rem;
+  font-family: inherit;
+  cursor: pointer;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#ankiweb-bottomnav .tab-item svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+  fill: none;
+  flex-shrink: 0;
+}
+
+#ankiweb-bottomnav .tab-item .tab-label {
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+#ankiweb-bottomnav .tab-item:hover {
+  color: var(--text);
+}
+
+#ankiweb-bottomnav .tab-item.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+#ankiweb-bottomnav .tab-item.active svg {
+  stroke-width: 2.4;
+}
+
+/* More bottom sheet */
+#ankiweb-more-sheet[hidden] {
+  display: none;
+}
+#ankiweb-more-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+#ankiweb-more-sheet .backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+}
+#ankiweb-more-sheet .panel {
+  position: relative;
+  background: var(--surface);
+  color: var(--text);
+  border-top: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.2);
+}
+#ankiweb-more-sheet .hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+#ankiweb-more-sheet .close {
+  background: transparent;
+  border: 0;
+  font-size: 1.25rem;
+  min-width: 44px;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+#ankiweb-more-sheet .items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+#ankiweb-more-sheet .items a,
+#ankiweb-more-sheet .items button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  color: var(--text);
+  text-decoration: none;
+  border-radius: 8px;
+  background: transparent;
+  border: 0;
+  font-size: 0.95rem;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+#ankiweb-more-sheet .items a:hover,
+#ankiweb-more-sheet .items button:hover {
+  background: var(--surface-soft);
+}
+
+/* Medium (640-1023px) and wide (>= 1024px): keep top toolbar, hide bottom nav */
+@media (min-width: 640px) {
+  #ankiweb-bottomnav, #ankiweb-more-sheet {
+    display: none !important;
+  }
+  #ankiweb-toolbar {
+    display: flex !important;
+  }
+  body {
+    padding-top: calc(var(--nav-height) + 12px) !important;
+    padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  }
+}
+
+/* Compact (< 640px): show bottom nav, hide top toolbar */
+@media (max-width: 639px) {
+  #ankiweb-toolbar {
+    display: none !important;
+  }
+  #ankiweb-bottomnav {
+    display: flex !important;
+  }
+  body {
+    padding-top: 12px !important;
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 12px) !important;
+  }
+
+  /* Choice for Reviewer on compact viewport (SPEC T8a):
+     Hide bottom tab bar on /reviewer so the answer buttons (Show Answer,
+     Again/Hard/Good/Easy) sit cleanly at the bottom edge with env(safe-area-inset-bottom)
+     padding without overlap. Retain a compact top toolbar on /reviewer with a link back to Decks. */
+  body[data-context="reviewer"] #ankiweb-bottomnav,
+  body[data-context="reviewer"] #ankiweb-more-sheet {
+    display: none !important;
+  }
+  body[data-context="reviewer"] #ankiweb-toolbar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    min-height: 44px !important;
+    height: auto !important;
+    padding: 0 max(12px, env(safe-area-inset-left)) !important;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 2000;
+  }
+  body[data-context="reviewer"] #ankiweb-toolbar a:not([href="/deckbrowser"]) {
+    display: none !important;
+  }
+  body[data-context="reviewer"] #ankiweb-toolbar .menu {
+    display: none !important;
+  }
+  body[data-context="reviewer"] #ankiweb-toolbar a[href="/deckbrowser"] {
+    display: inline-flex !important;
+    align-items: center;
+    min-height: 44px;
+    font-weight: 600;
+  }
+  body[data-context="reviewer"] #ankiweb-toolbar .nm {
+    display: inline-flex !important;
+  }
+  body[data-context="reviewer"] {
+    padding-top: calc(48px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+  body[data-context="reviewer"] #ankiweb-answer {
+    bottom: 0 !important;
+  }
+}
+
+/* Decks screen */
+.decks {
+  width: min(100%, 900px);
+  max-width: 100%;
+  border-collapse: collapse;
+}
 .decks td, .decks th { min-height: var(--tap); padding: 9px 7px !important; }
 .decks .decktd { text-align: left; }
 .decks a.deck { display: inline-block; min-height: 34px; padding: 7px 4px; }
-.dyn-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 18px 10px; }
+.dyn-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 18px 10px; max-width: 100%; }
 .dyn-buttons a { min-height: var(--tap); display: inline-flex; align-items: center; padding: 8px 12px; }
 
-#qa { width: min(100%, 900px); margin: 0 auto; padding: 20px 16px 150px; overflow-wrap: anywhere; }
+/* Overview screen */
+table.overview-counts {
+  max-width: 100%;
+  margin: 0 auto;
+}
+.studybtn { margin: 16px 0; }
+.bottom-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.bottom-buttons button {
+  min-height: var(--tap);
+}
+
+/* Reviewer screen */
+#qa {
+  width: min(100%, 900px);
+  margin: 0 auto;
+  padding: 16px 16px 140px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+}
 #ankiweb-answer {
   position: fixed;
   z-index: 1500;
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 10px max(10px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom));
+  padding: 8px max(10px, env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) max(10px, env(safe-area-inset-left, 0px));
   background: color-mix(in srgb, var(--surface), transparent 4%);
   border-top: 1px solid var(--border);
   backdrop-filter: blur(12px);
+  box-sizing: border-box;
 }
-.ansbut { width: min(100%, 560px); display: block; margin: 0 auto; background: var(--accent); color: white; }
-.ease-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; width: min(100%, 720px); margin: 0 auto; }
-.ease { min-width: 0; min-height: 58px; padding: 6px 3px; }
-.ease-label, .ease-ivl { display: block; overflow: hidden; text-overflow: ellipsis; }
+.ansbut {
+  width: min(100%, 560px);
+  min-height: 44px;
+  display: block;
+  margin: 0 auto;
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.ease-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  width: min(100%, 720px);
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.ease {
+  min-width: 44px;
+  min-height: 48px;
+  padding: 6px 3px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ease-label, .ease-ivl { display: block; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .ease-label { font-weight: 650; }
 .ease-ivl { color: var(--muted); font-size: .78rem; }
-#rev-actions { display: flex; gap: 7px; overflow-x: auto; padding: 8px 10px; }
-.rev-act { flex: 0 0 auto; }
+#rev-actions {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 8px 10px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.rev-act { flex: 0 0 auto; min-height: var(--tap); }
 
-#browser-top { position: sticky; top: calc(var(--nav-height) + 1px); z-index: 500; background: var(--surface); }
-#browser-actions { display: flex; gap: 6px; overflow-x: auto; padding-top: 6px; }
-#browser-main { min-width: 0; }
-#results-wrap { min-width: 0; }
+/* Add screen */
+#add-chrome {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+}
+
+/* Browse screen */
+#browser { max-width: 100%; }
+#browser-top { position: sticky; top: 0; z-index: 500; background: var(--surface); max-width: 100%; box-sizing: border-box; }
+#browser-actions { display: flex; gap: 6px; overflow-x: auto; padding-top: 6px; max-width: 100%; }
+#browser-main { min-width: 0; max-width: 100%; }
+#results-wrap { min-width: 0; max-width: 100%; }
 .editor-frame { max-width: 100%; }
 
 @media (max-width: 639px) {
-  :root { --nav-height: 56px; }
-  #ankiweb-toolbar { top: auto !important; bottom: 0; padding-bottom: calc(6px + env(safe-area-inset-bottom)) !important; }
-  #ankiweb-toolbar .menu, #ankiweb-toolbar a[href='/about'], #ankiweb-toolbar a[href='/tools'], #ankiweb-toolbar a[href='/preferences'] { display: none; }
-  #ankiweb-toolbar .nm { margin-left: 0 !important; }
-  body { padding-top: 10px !important; padding-bottom: calc(var(--nav-height) + env(safe-area-inset-bottom) + 16px); }
-  #ankiweb-answer { bottom: calc(var(--nav-height) + env(safe-area-inset-bottom)); }
-  #qa { padding: 12px 12px 170px; min-height: 55vh; }
-  .ease-row { gap: 4px; }
-  .ease { font-size: .86rem; padding-inline: 2px; }
-  .decks th.count, .decks td.count { width: 40px; font-size: .82rem; }
-  .decks th:first-child { width: auto; }
-  .gears { width: 22px; height: 22px; }
-  #browser-top { top: 0; }
-  #browser-main { display: block !important; }
+  #browser-main { position: relative; display: block !important; }
   #sidebar { width: 100% !important; max-height: 28vh; overflow: auto; border-right: 0 !important; border-bottom: 1px solid var(--border); }
-  #results-wrap { max-height: 45vh !important; }
+  #browser:not(.drilldown) #detail { display: none !important; }
+  #browser:not(.drilldown) #results-wrap { width: 100% !important; max-height: calc(100vh - 180px) !important; overflow-x: auto; }
+  #browser.drilldown #sidebar,
+  #browser.drilldown #results-wrap,
+  #browser.drilldown #browser-actions { display: none !important; }
+  #browser.drilldown #detail { display: block !important; width: 100% !important; border-left: 0 !important; border-top: 0 !important; padding: 0 !important; }
+  #browser-back-bar { display: none; }
+  #browser.drilldown #browser-back-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--surface-soft);
+    border-bottom: 1px solid var(--border);
+  }
+  #browser.drilldown #browser-back-bar button {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+  }
+  #results { width: 100%; max-width: 100%; }
   #search { width: 100% !important; min-height: var(--tap); }
   .editor-frame { height: 62vh !important; }
   textarea, input, select { max-width: 100%; font-size: 16px; }
-}
 
-@media (prefers-color-scheme: dark) {
-  :root { --surface: #17191d; --surface-soft: #23262c; --text: #f1f3f5; --muted: #aab2bf; --border: #404650; --accent: #7aa7ff; }
+  /* Add screen on compact */
+  body[data-context="add"] {
+    padding-top: 56px !important;
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 72px) !important;
+  }
+  #add-chrome {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    height: auto !important;
+    min-height: 44px !important;
+    padding: 6px max(12px, env(safe-area-inset-left, 0px)) !important;
+    background: var(--surface-soft) !important;
+    border-bottom: 1px solid var(--border) !important;
+    z-index: 1000 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+  }
+  #add-chrome label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+  }
+  #add-chrome select {
+    max-width: 140px;
+    min-height: 32px;
+  }
+  #add-chrome a {
+    margin-left: auto;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+  }
+  body[data-context="add"] #add-btn {
+    position: fixed !important;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 8px) !important;
+    left: max(16px, env(safe-area-inset-left, 0px)) !important;
+    right: max(16px, env(safe-area-inset-right, 0px)) !important;
+    width: auto !important;
+    min-height: 44px !important;
+    z-index: 2100 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: var(--accent) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25) !important;
+    cursor: pointer !important;
+  }
+
+  /* Edit screen on compact */
+  body[data-context="editor"] {
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+  body[data-context="editor"] #editor-save-bar {
+    display: block !important;
+    position: fixed !important;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    left: max(16px, env(safe-area-inset-left, 0px)) !important;
+    right: max(16px, env(safe-area-inset-right, 0px)) !important;
+    z-index: 2000 !important;
+  }
+  body[data-context="editor"] #save-btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: var(--accent) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25) !important;
+    cursor: pointer !important;
+  }
+
+  /* Stacked fields in note-editor */
+  .fields {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    padding: 0 !important;
+  }
+  .field-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+  }
+  .editor-field,
+  .rich-text-editable {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .note-editor {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: hidden !important;
+  }
+  .editor-toolbar {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
 }

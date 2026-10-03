@@ -171,5 +171,34 @@
     localStorage.setItem("ankiweb-night", on ? "0" : "1");
     location.reload();
   };
+  window.ankiwebToggleMore = (show) => {
+    const sheet = document.getElementById("ankiweb-more-sheet");
+    const btn = document.getElementById("ankiweb-more-btn");
+    if (!sheet) return;
+    const isOpen = sheet.classList.contains("open") && !sheet.hasAttribute("hidden");
+    const target = typeof show === "boolean" ? show : !isOpen;
+    if (target) {
+      sheet.classList.add("open");
+      sheet.removeAttribute("hidden");
+      if (btn) btn.setAttribute("aria-expanded", "true");
+      const first = sheet.querySelector("a, button");
+      if (first) first.focus();
+    } else {
+      sheet.classList.remove("open");
+      sheet.setAttribute("hidden", "");
+      if (btn) {
+        btn.setAttribute("aria-expanded", "false");
+        btn.focus();
+      }
+    }
+  };
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const sheet = document.getElementById("ankiweb-more-sheet");
+      if (sheet && sheet.classList.contains("open")) {
+        window.ankiwebToggleMore(false);
+      }
+    }
+  });
   window.addEventListener("load", () => bridge.ready());
 })();
