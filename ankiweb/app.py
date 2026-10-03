@@ -4,10 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from ankiweb.config import Settings, host_allowed
 from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, password_ok
+from ankiweb.security import origin_ok, security_headers
+from ankiweb.api.v1 import PREFIX as API_PREFIX, PUBLIC_PATHS as API_PUBLIC, build_api_router
 
 
 def _login_html(error: bool = False) -> str:
@@ -68,23 +70,38 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     app = FastAPI(title="ankiweb", lifespan=lifespan)
 
-    async def host_guard(request, call_next):
+    extra_headers = security_headers(hsts=settings.secure_cookie)
+
+    def _gate(path: str):
+        """Response for an unauthenticated request, or None when the path is public:
+        JSON 401 for the API, a redirect to the login form for pages."""
+        if path.startswith(API_PREFIX + "/"):
+            return None if path in API_PUBLIC else JSONResponse(
+                {"detail": "unauthenticated"}, status_code=401)
+        return None if path in ("/login", "/logout", "/healthz") else RedirectResponse(
+            "/login", status_code=303)
+
+    async def guard(request, call_next):
+        """One ordered gate so the baseline headers land on every response, including the
+        403/303 short-circuits: host (DNS-rebinding) -> origin (CSRF, V8) -> session."""
         host = request.headers.get("host", "")
+        session_ok = auth_enabled and sessions.valid(request.cookies.get(COOKIE))
         if not host_allowed(host, settings.allowed_hosts):
-            return PlainTextResponse("forbidden host", status_code=403)
-        return await call_next(request)
+            resp = PlainTextResponse("forbidden host", status_code=403)
+        elif not origin_ok(request.method, request.headers, host, settings.allowed_hosts,
+                           has_session=session_ok):
+            resp = PlainTextResponse("cross-origin request blocked", status_code=403)
+        # Only gates when a password is configured (startup refuses to run without one unless
+        # ANKIWEB_AUTH_DISABLED). /login, /logout, /healthz stay reachable for the login form.
+        elif auth_enabled and not session_ok and (denied := _gate(request.url.path)):
+            resp = denied
+        else:
+            resp = await call_next(request)
+        for name, value in extra_headers.items():
+            resp.headers.setdefault(name, value)
+        return resp
 
-    app.add_middleware(BaseHTTPMiddleware, dispatch=host_guard)
-
-    async def auth_guard(request, call_next):
-        # Open by default; only gates when ANKIWEB_PASSWORD is set. /login, /logout, /healthz
-        # stay reachable so an unauthenticated user can reach the login form.
-        if auth_enabled and request.url.path not in ("/login", "/logout", "/healthz"):
-            if not sessions.valid(request.cookies.get(COOKIE)):
-                return RedirectResponse("/login", status_code=303)
-        return await call_next(request)
-
-    app.add_middleware(BaseHTTPMiddleware, dispatch=auth_guard)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=guard)
 
     # --- specific routes FIRST, media catch-all LAST (Starlette matches in order) ---
     @app.get("/healthz")
@@ -116,6 +133,9 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
         resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie(COOKIE)
         return resp
+
+    app.include_router(build_api_router(lambda: app.state.service, sessions, login_limiter,
+                                        settings, auth_enabled))   # /api/v1/*
 
     static_dir = settings.shell_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
