@@ -85,3 +85,12 @@ def test_restore_drill_runs_with_no_network_and_no_data_mount():
 def test_backup_script_delegates_to_the_tested_tool():
     text = (ROOT / "scripts/backup.sh").read_text()
     assert "ankiweb.adapters.anki.backup" in text and "prune" in text
+
+
+def test_restore_drill_scratch_dir_is_not_under_tmp():
+    """Docker Desktop only shares $HOME-ish paths with containers; a bare `mktemp -d` lands in
+    /tmp and the bind mount is then denied ("path is not shared from the host")."""
+    text = (ROOT / "scripts/restore-drill.sh").read_text()
+    line = next(l for l in text.splitlines() if l.startswith("scratch="))
+    assert "mktemp -d" in line and ("${drill_tmp}" in line or "ANKIWEB_DRILL_TMP" in line), line
+    assert "ANKIWEB_DRILL_TMP" in text

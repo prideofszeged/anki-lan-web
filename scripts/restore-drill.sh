@@ -18,7 +18,11 @@ if [[ -z "${archive}" || ! -f "${archive}" ]]; then
 fi
 archive="$(cd "$(dirname "${archive}")" && pwd)/$(basename "${archive}")"
 
-scratch="$(mktemp -d)"
+# Scratch space for the extracted copy. Not /tmp: Docker Desktop only shares $HOME-ish paths, so a
+# bind mount from /tmp is denied. Keep it next to the backups (large media never touches RAM).
+drill_tmp="${ANKIWEB_DRILL_TMP:-${backup_dir}/.drill-tmp}"
+mkdir -p "${drill_tmp}"
+scratch="$(mktemp -d "${drill_tmp}/drill.XXXXXX")"
 trap 'rm -rf "${scratch}"' EXIT
 
 docker run --rm --network none --read-only --cap-drop ALL \
