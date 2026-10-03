@@ -409,3 +409,56 @@ def test_browse_compact_drilldown_iphone13(live_server_layout):
 
         browser.close()
 
+
+def test_add_screen_compact_stacked_fields_and_sticky_button(live_server_layout):
+    base = live_server_layout
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(**p.devices["iPhone 13"])
+        page = context.new_page()
+
+        page.goto(f"{base}/add")
+        page.wait_for_selector("#add-btn", timeout=6000)
+        page.wait_for_selector(".field-container", timeout=6000)
+
+        # Fields stack full width
+        fields = page.locator(".field-container")
+        assert fields.count() >= 2
+        vp = page.viewport_size
+        for i in range(fields.count()):
+            f_box = fields.nth(i).bounding_box()
+            assert f_box is not None
+            assert f_box["width"] >= vp["width"] - 20
+            if i > 0:
+                prev_box = fields.nth(i - 1).bounding_box()
+                assert f_box["y"] >= prev_box["y"] + prev_box["height"] - 1
+
+        # Scroll page to its end
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+
+        # 1. No horizontal scroll
+        scroll_w = page.evaluate("document.documentElement.scrollWidth")
+        inner_w = page.evaluate("window.innerWidth")
+        assert scroll_w <= inner_w + 1, f"horizontal scroll: scrollWidth ({scroll_w}) > innerWidth ({inner_w})"
+
+        # 2. Add button fully inside the viewport after scrolling
+        btn_box = page.locator("#add-btn").bounding_box()
+        assert btn_box is not None, "add button bounding box is None"
+        assert btn_box["x"] >= 0
+        assert btn_box["y"] >= 0
+        assert btn_box["x"] + btn_box["width"] <= vp["width"] + 1, (
+            f"add button overflows viewport width: {btn_box['x'] + btn_box['width']} > {vp['width']}"
+        )
+        assert btn_box["y"] + btn_box["height"] <= vp["height"] + 1, (
+            f"add button overflows viewport height: {btn_box['y'] + btn_box['height']} > {vp['height']}"
+        )
+
+        # 3. Not overlapped by bottom nav
+        nav_box = page.locator("#ankiweb-bottomnav").bounding_box()
+        assert nav_box is not None
+        assert btn_box["y"] + btn_box["height"] <= nav_box["y"] + 1, (
+            f"add button overlapped by bottom nav: btn bottom {btn_box['y'] + btn_box['height']} > nav top {nav_box['y']}"
+        )
+
+        browser.close()
+
