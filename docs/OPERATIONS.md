@@ -83,7 +83,9 @@ Copy backups to a second machine or encrypted cloud storage.
 Runs in a throwaway container with **no network and no `/data` mount**. It verifies the archive
 checksum (R1), extracts safely and checks every file against the manifest (R2), runs SQLite
 integrity through Anki's engine (R3), then M1–M9 against the embedded baseline and reports M10.
-Never test a restore by overwriting the active `data/`. Run the drill after every upgrade and at
+The extracted copy lives in `backups/.drill-tmp` (override with `ANKIWEB_DRILL_TMP`), not `/tmp`:
+Docker Desktop refuses bind mounts outside the paths it shares with containers, and large media
+should not sit in RAM. Never test a restore by overwriting the active `data/`. Run the drill after every upgrade and at
 least quarterly, and before retiring Webtop (SPEC V12).
 
 Do not use a bare `sqlite3` integrity check on a collection: it uses a custom `unicase` collation
