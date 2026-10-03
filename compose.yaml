@@ -19,7 +19,7 @@ services:
       ANKIWEB_PORT: 8000
       ANKIWEB_ALLOWED_HOSTS: 127.0.0.1,localhost,192.168.1.7
       ANKIWEB_SOURCE_URL: https://github.com/prideofszeged/anki-lan-web
-      ANKIWEB_SECURE_COOKIE: "false"
+      ANKIWEB_SECURE_COOKIE: ${ANKIWEB_SECURE_COOKIE:-false}
       TZ: America/New_York
     ports:
       - "127.0.0.1:18082:8000"
@@ -35,3 +35,34 @@ services:
     pids_limit: 256
     mem_limit: 768m
     cpus: 2.0
+
+  # LAN HTTPS front (SPEC section 13). Opt-in: `docker compose --profile lan up -d`.
+  # Binds ONE explicit LAN address, never 0.0.0.0. Pin the digest at cutover (T13).
+  proxy:
+    profiles: ["lan"]
+    image: caddy:2.8.4-alpine
+    container_name: anki-lan-proxy
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      ANKIWEB_LAN_HOST: ${ANKIWEB_LAN_HOST:-192.168.1.7}
+    ports:
+      - "${ANKIWEB_LAN_BIND:-192.168.1.7}:18443:18443"
+    volumes:
+      - ./deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    read_only: true
+    tmpfs:
+      - /config:size=8m
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 128m
+
+volumes:
+  caddy-data:

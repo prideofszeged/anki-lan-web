@@ -1,0 +1,29 @@
+# LAN TLS front for anki-lan-web (SPEC section 13, ADR 0002).
+# Config only: the `proxy` Compose service is behind the `lan` profile, so nothing listens on
+# :18443 until you run `docker compose --profile lan up -d` after acceptance.
+{
+	admin off
+	# No :80 listener exists, so there is nothing to redirect from.
+	auto_https disable_redirects
+}
+
+https://{$ANKIWEB_LAN_HOST:192.168.1.7}:18443 {
+	# Private CA kept in the caddy-data volume; trust its root cert on each owned device
+	# (see docs/OPERATIONS.md). Host is deliberately NOT rewritten: the app's CSRF/origin
+	# check compares Origin against the Host the browser actually used.
+	tls internal
+	encode zstd gzip
+
+	reverse_proxy app:8000 {
+		# Active check so a wedged app yields 502 quickly instead of hanging browsers.
+		health_uri /healthz
+		health_interval 30s
+	}
+
+	header -Server
+
+	log {
+		output stdout
+		format json
+	}
+}
