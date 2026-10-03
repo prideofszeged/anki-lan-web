@@ -711,16 +711,16 @@ Status: `x` done, `~` active, `.` todo.
 |---|---|---|---|
 |T0|x|preserve current Webtop + backups|current service healthy|
 |T1|x|record baseline counts/media/LAN/firewall|§2 complete|
-|T2|.|create Git repo + import upstream source with attribution|clean reproducible checkout|
-|T3|.|add architecture skeleton + ADRs|module boundaries compile|
-|T4|.|multi-stage Docker build + Compose|headless image healthy on loopback|
-|T5|.|upgrade upstream pin `25.9.4` → `26.09.3`|adapter/asset versions match; tests pass|
-|T6|.|create sanitized compatibility fixture + private production-copy test|M1–M10 pass on copy|
-|T7|.|implement `/api/v1` + generated TS contracts|contract suite pass|
-|T8|.|build mobile shell + deck/review flows|phone E2E review pass|
-|T9|.|auth/security/proxy hardening|security checklist pass|
-|T10|.|notes/browser/editor/import/export/stats responsive flows|feature E2E pass|
-|T11|.|backup/restore/upgrade automation|recovery drill pass|
+|T2|x|create Git repo + import upstream source with attribution|clean reproducible checkout|
+|T3|~|add architecture skeleton + ADRs|module boundaries compile|
+|T4|x|multi-stage Docker build + Compose|headless image healthy on loopback|
+|T5|x|upgrade upstream pin `25.9.4` → `26.09.3`|adapter/asset versions match; tests pass|
+|T6|~|create sanitized compatibility fixture + private production-copy test|M1–M10 pass on copy|
+|T7|~|implement `/api/v1` + generated TS contracts|contract suite pass|
+|T8|~|build mobile shell + deck/review flows|phone E2E review pass|
+|T9|~|auth/security/proxy hardening|security checklist pass|
+|T10|~|notes/browser/editor/import/export/stats responsive flows|feature E2E pass|
+|T11|~|backup/restore/upgrade automation|recovery drill pass|
 |T12|.|parallel LAN pilot on alternate port|≥7 days stable; no source writes|
 |T13|.|cutover `18443`; Webtop read-only fallback|acceptance + user signoff|
 |T14|.|retire Webtop runtime; retain recovery bundle|30-day stable window|
@@ -819,15 +819,15 @@ Rollback action: stop headless writer → restore pre-cutover backup → start p
 
 ## 23. Decision Queue
 
-Decide before T4:
+Decide before T4 (resolved 2026-10-03):
 
-- D1: internal project name; avoid `AnkiWeb` official-service confusion
-- D2: Caddy vs existing nginx TLS proxy
-- D3: upstream fork strategy: Git fork vs vendored subtree
+- D1: internal project name → `anki-lan-web` (avoid `AnkiWeb` official-service confusion)
+- D2: TLS proxy → Caddy service in this repo's Compose (config only; ⊥ bind `:18443` / touch UFW until cutover)
+- D3: upstream fork strategy → Git fork; `upstream` remote = `aitsc/ankiweb`
 
 Decide before T8:
 
-- D4: full custom reviewer shell vs Anki reviewer wrapped by mobile chrome
+- D4: **resolved 2026-10-03** → Anki reviewer/editor wrapped by mobile chrome; thin `/api/v1` for new work; ⊥ full Svelte rewrite v1
 - D5: local CA trust workflow for phones
 
 Decide before T15:
