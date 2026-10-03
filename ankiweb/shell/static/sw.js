@@ -3,7 +3,9 @@ const SHELL = [
   "/shell/static/mobile.css",
   "/shell/static/bootstrap.js",
   "/shell/static/manifest.webmanifest",
-  "/shell/static/icon.svg"
+  "/shell/static/icon.svg",
+  "/shell/static/spa-nav.css",
+  "/shell/static/spa-nav.js"
 ];
 self.addEventListener("install", event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
 self.addEventListener("activate", event => event.waitUntil(
