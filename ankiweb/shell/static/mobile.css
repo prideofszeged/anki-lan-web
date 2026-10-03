@@ -432,10 +432,37 @@ table.overview-counts {
 .editor-frame { max-width: 100%; }
 
 @media (max-width: 639px) {
-  #browser-main { display: block !important; }
+  #browser-main { position: relative; display: block !important; }
   #sidebar { width: 100% !important; max-height: 28vh; overflow: auto; border-right: 0 !important; border-bottom: 1px solid var(--border); }
-  #results-wrap { width: 100% !important; max-height: 45vh !important; overflow-x: auto; }
-  #detail { width: 100% !important; border-left: 0 !important; border-top: 1px solid var(--border); }
+  #browser:not(.drilldown) #detail { display: none !important; }
+  #browser:not(.drilldown) #results-wrap { width: 100% !important; max-height: calc(100vh - 180px) !important; overflow-x: auto; }
+  #browser.drilldown #sidebar,
+  #browser.drilldown #results-wrap,
+  #browser.drilldown #browser-actions { display: none !important; }
+  #browser.drilldown #detail { display: block !important; width: 100% !important; border-left: 0 !important; border-top: 0 !important; padding: 0 !important; }
+  #browser-back-bar { display: none; }
+  #browser.drilldown #browser-back-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--surface-soft);
+    border-bottom: 1px solid var(--border);
+  }
+  #browser.drilldown #browser-back-bar button {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+  }
   #results { width: 100%; max-width: 100%; }
   #search { width: 100% !important; min-height: var(--tap); }
   .editor-frame { height: 62vh !important; }

@@ -370,3 +370,42 @@ def test_text_zoom_200_percent_actions_reachable(live_server_layout):
 
         browser.close()
 
+
+def test_browse_compact_drilldown_iphone13(live_server_layout):
+    base = live_server_layout
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(**p.devices["iPhone 13"])
+        page = context.new_page()
+
+        page.goto(f"{base}/browse")
+        page.wait_for_selector("#search", timeout=6000)
+
+        # 1. Search
+        page.fill("#search", "Front")
+        page.keyboard.press("Enter")
+        page.wait_for_selector("#results-body tr.browser-row", timeout=6000)
+
+        # Initial compact browse: list visible, detail hidden
+        assert page.is_visible("#results-wrap")
+        assert not page.is_visible("#detail")
+
+        # 2. Tap row
+        page.click("#results-body tr.browser-row")
+
+        # 3. Detail visible and list hidden
+        page.wait_for_selector("#detail", state="visible", timeout=6000)
+        assert page.is_visible("#detail")
+        assert not page.is_visible("#results-wrap")
+
+        # 4. Back
+        page.wait_for_selector("#browser-back-bar button", timeout=6000)
+        page.click("#browser-back-bar button")
+
+        # 5. List visible
+        page.wait_for_selector("#results-wrap", state="visible", timeout=6000)
+        assert page.is_visible("#results-wrap")
+        assert not page.is_visible("#detail")
+
+        browser.close()
+
