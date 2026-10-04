@@ -180,11 +180,52 @@ def _migration_4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_5(conn: sqlite3.Connection) -> None:
+    for statement in (
+        """CREATE TABLE share_releases (
+            id TEXT PRIMARY KEY,
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            manifest_path TEXT NOT NULL,
+            bundle_path TEXT NOT NULL,
+            bundle_sha256 TEXT NOT NULL CHECK(length(bundle_sha256)=64),
+            created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            created_at INTEGER NOT NULL,
+            UNIQUE(share_id,version)
+        )""",
+        """CREATE TABLE share_subscriptions (
+            id TEXT PRIMARY KEY,
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE RESTRICT,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            mode TEXT NOT NULL CHECK(mode IN ('follow')),
+            installed_release INTEGER NOT NULL CHECK(installed_release >= 1),
+            target_deck_id INTEGER,
+            conflict_policy TEXT NOT NULL CHECK(conflict_policy IN ('retire','mirror')),
+            created_at INTEGER NOT NULL,
+            UNIQUE(share_id,user_id)
+        )""",
+        """CREATE TABLE subscription_entities (
+            subscription_id TEXT NOT NULL REFERENCES share_subscriptions(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            base_hash TEXT NOT NULL CHECK(length(base_hash)=64),
+            media_name TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(subscription_id,entity_type,source_id)
+        )""",
+        "CREATE INDEX share_releases_share ON share_releases(share_id,version)",
+        "CREATE INDEX subscriptions_user ON share_subscriptions(user_id,share_id)",
+    ):
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, "identity control tables", _migration_1),
     (2, "identity lookup indexes", _migration_2),
     (3, "durable job journals", _migration_3),
     (4, "share membership and invitations", _migration_4),
+    (5, "immutable releases and subscriptions", _migration_5),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

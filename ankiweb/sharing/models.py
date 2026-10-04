@@ -68,3 +68,37 @@ class ShareDetail:
     membership: ShareMembership
     members: tuple[ShareMembership, ...]
 
+
+@dataclass(frozen=True, slots=True)
+class ShareRelease:
+    id: str
+    share_id: str
+    version: int
+    manifest_path: str
+    bundle_path: str
+    bundle_sha256: str
+    created_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ShareSubscription:
+    id: str
+    share_id: str
+    user_id: str
+    mode: str
+    installed_release: int
+    target_deck_id: int | None
+    conflict_policy: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionEntity:
+    subscription_id: str
+    entity_type: str
+    source_id: str
+    recipient_id: str
+    base_hash: str
+    media_name: str | None
+    updated_at: datetime

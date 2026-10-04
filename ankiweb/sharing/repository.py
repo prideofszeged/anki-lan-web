@@ -13,7 +13,7 @@ from ankiweb.identity.repository import (
 
 from .models import (
     DeckShare, MembershipState, ShareDetail, ShareInvite, ShareMembership,
-    ShareRole, ShareState,
+    ShareRelease, ShareRole, ShareState, ShareSubscription, SubscriptionEntity,
 )
 
 
@@ -54,6 +54,32 @@ def _invite(row: sqlite3.Row) -> ShareInvite:
         created_at=_datetime(row["created_at"]), expires_at=_datetime(row["expires_at"]),
         consumed_at=_datetime(row["consumed_at"]), consumed_by=row["consumed_by"],
         revoked_at=_datetime(row["revoked_at"]),
+    )
+
+
+def _release(row: sqlite3.Row) -> ShareRelease:
+    return ShareRelease(
+        id=row["id"], share_id=row["share_id"], version=row["version"],
+        manifest_path=row["manifest_path"], bundle_path=row["bundle_path"],
+        bundle_sha256=row["bundle_sha256"], created_by=row["created_by"],
+        created_at=_datetime(row["created_at"]),
+    )
+
+
+def _subscription(row: sqlite3.Row) -> ShareSubscription:
+    return ShareSubscription(
+        id=row["id"], share_id=row["share_id"], user_id=row["user_id"], mode=row["mode"],
+        installed_release=row["installed_release"], target_deck_id=row["target_deck_id"],
+        conflict_policy=row["conflict_policy"], created_at=_datetime(row["created_at"]),
+    )
+
+
+def _entity(row: sqlite3.Row) -> SubscriptionEntity:
+    return SubscriptionEntity(
+        subscription_id=row["subscription_id"], entity_type=row["entity_type"],
+        source_id=row["source_id"], recipient_id=row["recipient_id"],
+        base_hash=row["base_hash"], media_name=row["media_name"],
+        updated_at=_datetime(row["updated_at"]),
     )
 
 
@@ -133,6 +159,18 @@ class SharingRepository:
             return _share(conn.execute(
                 "SELECT * FROM deck_shares WHERE id=?", (share_id,)
             ).fetchone())
+
+    def require_owner(self, *, actor_user_id: str, share_id: str) -> DeckShare:
+        with self.database.read() as conn:
+            self._require_owner(conn, share_id, actor_user_id)
+            row = conn.execute("SELECT * FROM deck_shares WHERE id=?", (share_id,)).fetchone()
+            if row is None:
+                raise ShareNotFoundError("share not found")
+            return _share(row)
+
+    def require_member(self, *, actor_user_id: str, share_id: str) -> ShareMembership:
+        with self.database.read() as conn:
+            return _membership(self._require_member(conn, share_id, actor_user_id))
 
     def list_shares(self, actor_user_id: str) -> list[DeckShare]:
         with self.database.read() as conn:
@@ -280,3 +318,123 @@ class SharingRepository:
                 action="share.member.removed", share_id=share_id,
             )
 
+    def next_release_version(self, *, actor_user_id: str, share_id: str) -> int:
+        with self.database.read() as conn:
+            self._require_owner(conn, share_id, actor_user_id)
+            row = conn.execute(
+                "SELECT state,current_release FROM deck_shares WHERE id=?", (share_id,),
+            ).fetchone()
+            if row is None:
+                raise ShareNotFoundError("share not found")
+            if row["state"] == ShareState.ARCHIVED.value:
+                raise ConflictError("archived share cannot publish")
+            return int(row["current_release"] or 0) + 1
+
+    def commit_release(
+        self, *, actor_user_id: str, share_id: str, version: int,
+        manifest_path: str, bundle_path: str, bundle_sha256: str, now: datetime,
+    ) -> ShareRelease:
+        with self.database.transaction() as conn:
+            self._require_owner(conn, share_id, actor_user_id)
+            share = conn.execute(
+                "SELECT state,current_release FROM deck_shares WHERE id=?", (share_id,),
+            ).fetchone()
+            expected = int(share["current_release"] or 0) + 1
+            if share["state"] == ShareState.ARCHIVED.value or version != expected:
+                raise ConflictError("release version changed concurrently")
+            release_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO share_releases(id,share_id,version,manifest_path,bundle_path,
+                   bundle_sha256,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (release_id, share_id, version, manifest_path, bundle_path,
+                 bundle_sha256, actor_user_id, _epoch(now)),
+            )
+            conn.execute(
+                "UPDATE deck_shares SET current_release=?,state='active' WHERE id=?",
+                (version, share_id),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.release.published",
+                share_id=share_id, metadata={"version": version, "sha256": bundle_sha256},
+            )
+            return _release(conn.execute(
+                "SELECT * FROM share_releases WHERE id=?", (release_id,)
+            ).fetchone())
+
+    def get_release(
+        self, *, actor_user_id: str, share_id: str, version: int,
+    ) -> ShareRelease:
+        with self.database.read() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            row = conn.execute(
+                "SELECT * FROM share_releases WHERE share_id=? AND version=?",
+                (share_id, version),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("release not found")
+            return _release(row)
+
+    def get_release_for_owner(
+        self, *, actor_user_id: str, share_id: str, version: int,
+    ) -> ShareRelease:
+        self.require_owner(actor_user_id=actor_user_id, share_id=share_id)
+        return self.get_release(
+            actor_user_id=actor_user_id, share_id=share_id, version=version,
+        )
+
+    def commit_follow_install(
+        self, *, actor_user_id: str, share_id: str, version: int,
+        target_deck_id: int | None, entities: list[dict], now: datetime,
+    ) -> ShareSubscription:
+        with self.database.transaction() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            if not conn.execute(
+                "SELECT 1 FROM share_releases WHERE share_id=? AND version=?",
+                (share_id, version),
+            ).fetchone():
+                raise NotFoundError("release not found")
+            if conn.execute(
+                "SELECT 1 FROM share_subscriptions WHERE share_id=? AND user_id=?",
+                (share_id, actor_user_id),
+            ).fetchone():
+                raise ConflictError("follow subscription already exists")
+            subscription_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO share_subscriptions(id,share_id,user_id,mode,installed_release,
+                   target_deck_id,conflict_policy,created_at)
+                   VALUES(?,?,?,'follow',?,?,'retire',?)""",
+                (subscription_id, share_id, actor_user_id, version, target_deck_id, _epoch(now)),
+            )
+            for item in entities:
+                conn.execute(
+                    """INSERT INTO subscription_entities(subscription_id,entity_type,source_id,
+                       recipient_id,base_hash,media_name,updated_at) VALUES(?,?,?,?,?,?,?)""",
+                    (subscription_id, item["entity_type"], item["source_id"],
+                     item["recipient_id"], item["base_hash"], item.get("media_name"),
+                     _epoch(now)),
+                )
+            self._audit(
+                conn, now=now, actor=actor_user_id, target=actor_user_id,
+                action="share.subscription.created", share_id=share_id,
+                metadata={"version": version},
+            )
+            return _subscription(conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=?", (subscription_id,)
+            ).fetchone())
+
+    def list_subscription_entities(
+        self, *, actor_user_id: str, subscription_id: str,
+    ) -> list[SubscriptionEntity]:
+        with self.database.read() as conn:
+            subscription = conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=? AND user_id=?",
+                (subscription_id, actor_user_id),
+            ).fetchone()
+            if subscription is None:
+                raise NotFoundError("subscription not found")
+            rows = conn.execute(
+                """SELECT * FROM subscription_entities WHERE subscription_id=?
+                   ORDER BY entity_type,source_id""",
+                (subscription_id,),
+            ).fetchall()
+            return [_entity(row) for row in rows]
