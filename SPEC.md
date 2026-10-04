@@ -1,9 +1,9 @@
 # Anki LAN Web — Modular Headless Server Spec
 
-status: draft 0.1
+status: draft 0.2
 date: 2026-10-03
 owner: steven
-scope: single-user, LAN-first, browser-native Anki server
+scope: LAN-first browser-native Anki server; single-user v1; multi-user platform planned
 source base: `https://github.com/aitsc/ankiweb`
 Anki target: `26.09.3`
 
@@ -16,7 +16,7 @@ Goals:
 - real HTML/CSS/JS UI; ⊥ VNC, X11, Qt window, desktop environment
 - Anki scheduler, collection format, media, templates, review history preserved
 - phone-first study UX; desktop-capable management UX
-- single-user v1; multi-user-ready isolation model
+- single-user v1; concurrent isolated users + controlled deck collaboration next
 - modular backend, frontend, deployment, extensions
 - safe upgrades, backup, rollback
 - LAN HTTPS @ `192.168.1.7:18443`
@@ -109,7 +109,7 @@ V9: AnkiConnect API → loopback/container network by default; explicit opt-in f
 
 V10: plugin → versioned capability API; ⊥ direct DB/filesystem/process access by default.
 
-V11: user isolation → one process/worker + collection/media root per user.
+V11: user isolation → one runtime/serialized worker + collection/media root per user.
 
 V12: backup restore test ! pass before Webtop retirement.
 
@@ -118,6 +118,28 @@ V13: source modifications served via `/about/source` per AGPL obligations.
 V14: secrets ∉ image, Git, logs, generated support bundles.
 
 V15: collection downgrade ⊥ without disposable copy + compatibility proof.
+
+V16: ∀ HTTP/WS/job → authenticated `actor_user_id` + explicit `resource_owner_id`.
+
+V17: user collection, media, scheduler, review log → private; ⊥ implicit cross-user access.
+
+V18: one collection path → one `CollectionRuntime` + one serialized worker + one process lock.
+
+V19: session token stored hashed; session row bound to one user, expiry, revocation epoch.
+
+V20: quota preflight + postflight required for import, upload, release install, workspace publish.
+
+V21: shared deck release immutable; manifest + bundle SHA-256 required.
+
+V22: collaboration workspace uses separate collection root; ⊥ review/scheduling in workspace.
+
+V23: shared deck install/update preserves recipient scheduling + review history.
+
+V24: invitation token single-use, hashed at rest, scoped, expiring.
+
+V25: admin UI exposes account/usage/audit metadata; ⊥ card/note content impersonation.
+
+V26: account deletion two-phase; immediate suspend + delayed recoverable purge.
 
 ## 5. Architecture
 
@@ -291,7 +313,7 @@ Each service:
 Base: `/api/v1`
 
 ```text
-api: POST /auth/login → 204 + session cookie
+api: POST /auth/login {username,password} → 204 + session cookie
 api: POST /auth/logout → 204
 api: GET /session → 200 {user,csrfToken,capabilities}
 
@@ -436,34 +458,506 @@ Rules:
 - no live raw file backup while collection mutation active
 - backup includes collection, media manifest, app DB, versions, checksums
 
-## 11. Multi-user-Ready Design
+## 11. Multi-user + Deck Collaboration
 
-v1 user count: `1`.
+### 11.1 outcome + boundary
 
-Future isolation:
+MVP-A: concurrent private accounts; isolated decks, media, scheduler, sessions, jobs, backups, quotas.
+
+MVP-B: administration, invitations, versioned deck sharing, shared authoring workspaces.
+
+Non-goals:
+
+- ⊥ public signup, email delivery, billing, public marketplace
+- ⊥ shared live review queue or shared scheduling history
+- ⊥ two users writing same private collection
+- ⊥ automatic destructive overwrite of subscriber local edits
+- ⊥ admin impersonation
+- ⊥ native Anki sync protocol in T16–T19
+
+### 11.2 identity + provisioning
+
+Global roles: `owner | admin | user`.
+
+Account states: `invited | active | suspended | purge_pending | purged`.
+
+Provisioning:
+
+1. migration seeds existing account as `local`, role `owner`
+2. owner/admin creates account invitation
+3. invitation URL/code shown once; ⊥ email dependency
+4. invitee selects username + password
+5. Argon2id credential stored; token consumed atomically
+6. private collection initialized empty or from uploaded package
+
+Rules:
+
+- username normalized + unique; display name non-authoritative
+- bootstrap owner creation → local CLI only
+- password reset → admin-created one-time reset token or local CLI
+- suspend → revoke sessions + reject jobs + close idle runtime
+- suspend during mutation → mutation completes/rolls back, then runtime closes
+- purge default delay `30 days`; restore allowed before deadline
+- last active owner ⊥ suspend/purge/demote
+
+### 11.3 app DB schema
+
+`/data/app/app.db` owns identity/control metadata; ⊥ card/note bodies.
 
 ```text
-/data/users/{user_id}/anki/collection.anki2
-/data/users/{user_id}/anki/media/
-/data/users/{user_id}/app/
+users(id UUID PK, username_norm UNIQUE, display_name, global_role, state,
+      created_at, suspended_at, purge_after, auth_epoch)
+credentials(user_id PK, password_hash, changed_at)
+sessions(id UUID PK, user_id, token_hash UNIQUE, csrf_hash, created_at,
+         last_seen_at, expires_at, auth_epoch, user_agent_hash, ip_prefix)
+account_invites(id UUID PK, token_hash UNIQUE, created_by, intended_username,
+                global_role, expires_at, consumed_at)
+password_resets(id UUID PK, token_hash UNIQUE, user_id, expires_at, consumed_at)
+user_quotas(user_id PK, storage_bytes, import_bytes, active_jobs,
+            active_sessions, review_sockets)
+audit_events(id, occurred_at, actor_user_id, target_user_id, action,
+             resource_type, resource_id, request_id, outcome, metadata_json)
+
+deck_shares(id UUID PK, owner_user_id, workspace_id, name, state,
+            current_release, created_at)
+share_members(share_id, user_id, role, state, joined_at, UNIQUE(share_id,user_id))
+share_invites(id UUID PK, share_id, token_hash UNIQUE, role, created_by,
+              intended_user_id, expires_at, consumed_at)
+share_releases(id UUID PK, share_id, version, manifest_path, bundle_path,
+               bundle_sha256, created_by, created_at, UNIQUE(share_id,version))
+share_subscriptions(id UUID PK, share_id, user_id, mode, installed_release,
+                    target_deck_id, conflict_policy, created_at)
+workspace_revisions(workspace_id, entity_type, entity_id, revision,
+                    changed_by, changed_at)
+workspace_comments(id UUID PK, workspace_id, entity_type, entity_id,
+                   author_user_id, body, resolved_at, created_at)
 ```
 
-Runtime:
+Migration system: ordered app-schema versions; one transaction/version; startup blocks readiness on failure.
 
-- `TenantRouter` maps authenticated user → `CollectionRuntime`
-- one serialized worker per active user
-- idle runtime eviction after safe close
-- resource quota per user
-- ⊥ shared collection writes across users
-- shared deck feature uses import/copy or explicit service; ⊥ shared SQLite file
+### 11.4 storage layout
 
-v1 code requirements:
+```text
+/data/app/app.db
+/data/users/{user_uuid}/anki/collection.anki2
+/data/users/{user_uuid}/anki/collection.media/
+/data/users/{user_uuid}/tmp/
+/data/users/{user_uuid}/app/
+/data/shares/{share_uuid}/anki/collection.anki2
+/data/shares/{share_uuid}/anki/collection.media/
+/data/shares/{share_uuid}/releases/{version}/manifest.json
+/data/shares/{share_uuid}/releases/{version}/deck.apkg
+/data/backups/system/
+/data/backups/users/{user_uuid}/
+/data/backups/shares/{share_uuid}/
+```
 
-- session exposes `user_id`
-- application context carries `user_id`
-- storage paths resolved by `UserStorage` interface
-- default user seeded as `local`
-- ⊥ hard-coded global collection singleton outside runtime registry
+`UserStorage` + `ShareStorage` resolve UUID → paths. Request data never forms filesystem path.
+
+Rules:
+
+- UUID directory names only; username rename ≠ path move
+- owner UID/GID fixed; directories `0700`; files `0600`
+- symlink traversal ⊥
+- temp + backup roots same user boundary
+- cross-user hardlinks/symlinks ⊥
+- share release bundle immutable after publish
+- quota counts collection, media, temp, private backups over retention floor
+- share workspace/releases charged to share owner; member installs charged to member
+
+### 11.5 runtime registry
+
+```python
+ResourceKey = UserCollection(user_id) | ShareWorkspace(share_id)
+
+class RuntimeRegistry(Protocol):
+    async def acquire(self, key: ResourceKey) -> RuntimeLease: ...
+    async def evict(self, key: ResourceKey, reason: str) -> None: ...
+    async def drain(self) -> None: ...
+```
+
+`RuntimeLease` owns `CollectionRuntime`; ref-counted by HTTP, WS, job.
+
+Lifecycle:
+
+1. resolve `TenantContext`
+2. authorize actor → resource
+3. acquire runtime slot
+4. open collection + process lock if cold
+5. serialized operation
+6. release lease
+7. idle `15 min` + zero lease/job/socket → flush, close, evict
+
+Defaults:
+
+- `ANKIWEB_MAX_ACTIVE_RUNTIMES=4`
+- `ANKIWEB_RUNTIME_IDLE_SECONDS=900`
+- `ANKIWEB_RUNTIME_WAIT_SECONDS=30`
+- capacity timeout → `503 {code:"runtime_capacity"}`
+- global import/export/backup semaphore = `2`
+
+Requirements:
+
+- per-runtime reviewer sessions keyed by authenticated browser session
+- no global current deck/card/reviewer state
+- WS registry partitioned by resource key + session
+- app shutdown → stop admission, drain jobs, close ∀ runtimes
+- runtime open failure affects tenant readiness, not unrelated tenants
+- process lock + registry uniqueness defend double open
+
+### 11.6 request + job context
+
+```text
+TenantContext {actor_user_id, resource_owner_id, resource_key,
+               global_role, resource_role, session_id, request_id}
+JobContext    {job_id, actor_user_id, resource_key, capability,
+               idempotency_key, created_at}
+```
+
+Rules:
+
+- context created after auth; immutable through request
+- repository/service methods require context or `ResourceKey`; ⊥ ambient global user
+- queued job re-authorizes at start; revoked/suspended actor → cancel
+- result/download checks actor + resource membership
+- audit actor and target separately
+- session revoke → close matching WS ≤ `5 s`
+
+### 11.7 sessions
+
+- durable SQLite sessions; restart ≠ logout
+- opaque random token ≥`256 bits`; only SHA-256 digest stored
+- cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`
+- idle expiry `30 days`; absolute expiry `90 days`
+- user `auth_epoch` change revokes ∀ sessions without row scan
+- max active sessions default `10`; oldest idle session revoked on new login
+- `GET /api/v1/auth/sessions` lists device label, created, last seen, approximate IP
+- user can revoke one/all sessions
+- admin suspend revokes all; admin cannot mint user session
+
+### 11.8 quotas + capacity
+
+Defaults/user:
+
+```text
+storage              5 GiB
+single import/upload 2 GiB
+active jobs          2
+active sessions      10
+review WebSockets    4
+reserved review DB   128 MiB
+```
+
+Policy:
+
+- warning @ `80%`; hard limit @ `100%`
+- upload/import → content-length preflight + streaming byte counter + staged-file cleanup
+- import/install → estimate expanded media + collection delta before commit
+- postflight actual usage; overrun → rollback import/install
+- quota-sensitive import/install runs on disposable same-user collection copy; validate → atomic root swap
+- storage-growing management ops blocked @ hard limit with `507 quota_exceeded`
+- review answers use reserved space; ⊥ acknowledge answer before durable commit
+- host free space `<5%` → block all growing jobs; health exposes degraded reason
+- quota override audited; owner/admin only
+- usage recompute daily + after large job; discrepancy >`1%` → repair counter
+
+### 11.9 private backup + restore
+
+- per-user backup quiesces only target runtime
+- user backup includes collection, media, user app metadata, manifest/checksum
+- system backup includes global `app.db`, invitations, memberships, audit, release index
+- share backup includes workspace + immutable releases + comments
+- archive encryption future; filesystem permissions `0600` required now
+- restore-user flow: suspend → backup current → restore scratch → M1–M10 → atomic root swap → revoke sessions → reopen
+- restore-as-new flow assigns new user UUID; rewrites control metadata only
+- full disaster restore order: `app.db` → users → shares → release checksum validation
+- purge waits for retention deadline + final backup policy
+- backup jobs serialized against same runtime mutations
+
+Targets:
+
+- RPO ≤`24 h`
+- single-user restore RTO ≤`30 min` at `5 GiB`
+- quarterly random user + share restore drill
+
+### 11.10 administration
+
+Owner/admin capabilities:
+
+- create/revoke account invite
+- list users, state, last login, usage, backup age
+- set quota; suspend/reactivate; initiate purge; cancel pending purge
+- create password-reset token
+- view security/operation audit metadata
+- run user backup/restore health check
+
+Restrictions:
+
+- admin list/search ⊥ note text, card HTML, media bytes, review answers
+- admin ⊥ impersonation or session minting
+- content support requires user-exported diagnostic bundle
+- owner-only: promote/demote admin, transfer system ownership, destructive purge
+- every admin mutation → re-auth if credential age >`15 min` + audit event
+
+### 11.11 invitation model
+
+Account invite:
+
+- token ≥`256 bits`; DB stores digest only
+- token ∉ HTTP path/query/log; invite URL uses fragment; acceptance sends token in POST body
+- default expiry `24 h`; one use
+- role + intended username fixed at creation
+- accept endpoint rate-limited; password set + consume in one transaction
+
+Share invite:
+
+- role `viewer | editor`; owner role ⊥ invite
+- token ∉ HTTP path/query/log; invite URL uses fragment; acceptance sends token in POST body
+- optional `intended_user_id`; if set, other user denied
+- default expiry `7 days`; one use
+- revocation immediate before acceptance
+- acceptance creates membership once; replay idempotent for same user
+
+### 11.12 deck sharing model
+
+Share states: `draft | active | archived`.
+
+Membership roles:
+
+|role|read workspace|comment|edit content|publish|members|delete share|
+|---|---:|---:|---:|---:|---:|---:|
+|viewer|x|x|.|.|.|.|
+|editor|x|x|x|.|.|.|
+|owner|x|x|x|x|x|x|
+
+Global admin ≠ automatic share member.
+
+Workspace:
+
+- separate Anki collection; one shared deck + required notetypes/media
+- create by copying owner deck; source private deck unchanged
+- scheduling/review actions disabled
+- edits allowed: notes, fields, tags, templates, CSS, deck description, media
+- deck hierarchy within workspace supported; external private deck links ⊥
+- note GUID stable across releases
+- workspace runtime uses same serialized worker model
+
+Release:
+
+```json
+{
+  "share_id": "uuid",
+  "version": 3,
+  "parent_version": 2,
+  "anki_version": "26.09.3",
+  "created_at": "ISO-8601",
+  "note_guids_sha256": "...",
+  "media_sha256": {},
+  "tombstones": [],
+  "bundle_sha256": "..."
+}
+```
+
+- owner publishes explicit immutable release
+- publish validates DB, templates, referenced media, package re-import
+- failed validation → no release/version increment
+- semantic version label optional; monotonic integer canonical
+- archived share allows existing release download; blocks edits/publish/invites
+
+### 11.13 install + subscription
+
+Modes:
+
+- `copy`: one-time release import; no relationship retained
+- `follow`: subscription tracks installed release + source GUID/base hashes
+
+Install/update job:
+
+1. authorize membership + release
+2. stage bundle under recipient root
+3. checksum + quota validation
+4. snapshot affected recipient deck metadata
+5. import content via recipient runtime
+6. preserve scheduling/review logs
+7. store source GUID/base hashes + installed release
+8. emit summary + conflicts
+
+Update policy:
+
+- upstream new note/media → add
+- upstream changed content + recipient unchanged from base → update
+- recipient field/template changed from base → conflict; ⊥ silent overwrite
+- upstream tombstone → tag recipient note `ankiweb::retired`; ⊥ delete default
+- optional `mirror` deletion policy requires per-subscription explicit enable + preview
+- deck options/scheduling config local by default; upstream change shown for opt-in apply
+- unsubscribe retains installed deck/content + local history
+- failed update rolls back content transaction and leaves installed release unchanged
+
+Conflict object:
+
+```text
+{id, entityType, entityId, field, baseHash, localValue, upstreamValue,
+ release, resolution: mine|upstream|manual|null}
+```
+
+Conflict values visible only to recipient. Resolution audit stores hashes, not field bodies.
+
+### 11.14 collaboration
+
+- optimistic revision per note/template/deck config
+- mutation requires `expectedRevision`; mismatch → `409 edit_conflict`
+- no CRDT/character-level co-editing
+- editor sees latest entity + conflict diff, reapplies edit manually
+- comments attached to note/template/deck entity; Markdown subset; plain local links only
+- comment edit window `15 min`; afterward append reply or resolve
+- member removal/revocation → WS close ≤`5 s`; pending mutation re-authorizes before commit
+- owner transfer atomic; old owner becomes editor unless removed
+- deleting share → archive first; hard purge after `30 days` + no active restore hold
+- workspace events visible only to active members
+
+### 11.15 API + events
+
+Auth/user:
+
+```text
+api: POST /api/v1/auth/login {username,password} → 204 + durable session
+api: GET /api/v1/auth/sessions → 200 {sessions[]}
+api: DELETE /api/v1/auth/sessions/{id} → 204
+api: DELETE /api/v1/auth/sessions → 204
+api: POST /api/v1/account-invitations/accept {token,username,password} → 201 {user}
+api: GET /api/v1/me/usage → 200 {quota,used,warnings[]}
+```
+
+Admin:
+
+```text
+api: GET /api/v1/admin/users → 200 {users[],cursor}
+api: POST /api/v1/admin/account-invitations → 201 {inviteUrl,expiresAt}
+api: PATCH /api/v1/admin/users/{id} → 200 {user}
+api: POST /api/v1/admin/users/{id}/password-reset → 201 {resetUrl,expiresAt}
+api: POST /api/v1/admin/users/{id}/backup → 202 {jobId}
+api: GET /api/v1/admin/audit → 200 {events[],cursor}
+```
+
+Sharing:
+
+```text
+api: GET /api/v1/shares → 200 {shares[],cursor}
+api: POST /api/v1/shares → 202 {jobId}
+api: GET /api/v1/shares/{id} → 200 {share,membership,releases[]}
+api: POST /api/v1/shares/{id}/invitations → 201 {inviteUrl,expiresAt}
+api: POST /api/v1/share-invitations/accept {token} → 200 {membership}
+api: DELETE /api/v1/shares/{id}/members/{userId} → 204
+api: POST /api/v1/shares/{id}/releases → 202 {jobId}
+api: POST /api/v1/shares/{id}/installs → 202 {jobId}
+api: POST /api/v1/subscriptions/{id}/updates → 202 {jobId}
+api: GET /api/v1/jobs/{id}/conflicts → 200 {conflicts[]}
+api: POST /api/v1/jobs/{id}/conflicts/{conflictId}/resolve → 200 {conflict}
+api: PATCH /api/v1/shares/{id}/workspace/notes/{guid} → 200 {note,revision}
+api: POST /api/v1/shares/{id}/workspace/comments → 201 {comment}
+```
+
+Events:
+
+```text
+event: user.session.revoked
+event: user.quota.warning
+event: user.state.changed
+event: share.workspace.changed
+event: share.member.changed
+event: share.release.published
+event: share.subscription.update_available
+event: share.update.conflict
+```
+
+∀ endpoints: generated OpenAPI + TS client; cursor pagination; idempotency key on POST jobs/invites.
+
+### 11.16 existing-user migration
+
+Preconditions: verified current backup + app stopped + free space ≥ current user root ×`2`.
+
+Steps:
+
+1. migrate app DB schema
+2. create `local` owner UUID; hash current plaintext credential if needed; remove plaintext env config
+3. create target user root
+4. copy collection/media; fsync; preserve source immutable
+5. run M1–M10 against target
+6. atomically activate `UserStorage(local)` mapping
+7. start multi-user build loopback-only
+8. login, review, audio, import/export, backup smoke
+9. retain old root ≥`30 days`
+
+Rollback before first target write → old build/root. After target write → stop, restore migration backup, old build/root.
+
+Existing in-memory sessions intentionally revoked once; subsequent sessions durable.
+
+### 11.17 acceptance gates
+
+Multi-user:
+
+```text
+MU1  two users may use same deck/note IDs; reads/writes remain isolated
+MU2  answer by user A changes only A scheduler/review log
+MU3  media traversal/crafted UUID cannot cross roots
+MU4  session survives restart; revoke/suspend closes HTTP + WS
+MU5  four active runtimes + queued fifth respect capacity timeout
+MU6  idle eviction/reopen preserves counts + scheduler state
+MU7  quota blocks staged growth; no partial import/media residue
+MU8  per-user backup/restore leaves other active user unaffected
+MU9  migrated local user passes M1–M10
+MU10 admin cannot fetch user card/note/media content via admin API
+MU11 audit records actor/target/action; secrets/content absent
+MU12 25-account load: 8 active browsers, 4 runtimes, p95 review transition ≤350 ms
+MU13 same user on two devices cannot double-answer one card; stale lease → 409
+```
+
+Sharing/collaboration:
+
+```text
+SH1  nonmember denied workspace/release URLs + WS
+SH2  invite expires, revokes, consumes once, binds intended user
+SH3  viewer/editor/owner permission matrix enforced server-side
+SH4  published release immutable + checksum/re-import valid
+SH5  copy install reproduces notes/templates/media in recipient root
+SH6  follow update preserves recipient scheduling + review history
+SH7  divergent local field produces conflict; ⊥ silent overwrite
+SH8  tombstone retires by default; mirror delete requires explicit preview
+SH9  concurrent stale workspace edit → 409; winning edit preserved
+SH10 removed member loses active WS + future job access ≤5 s
+SH11 share/workspace/release backup restores + checksum passes
+SH12 subscriber cannot access owner private decks outside workspace/release
+```
+
+Security suite: horizontal-IDOR matrix ∀ user/share/admin endpoints; CSRF/origin/host checks; rate limits; path fuzzing.
+
+### 11.18 delivery estimate
+
+Assumptions: one engineer; current v1 green; LAN-only; no email/public signup/billing/native sync.
+
+MVP-A — `7–10 engineer days`:
+
+|stage|days|output|exit|
+|---|---:|---|---|
+|A1|2|app DB users, durable sessions, account invites|auth/CSRF/session tests|
+|A2|3|`TenantContext`, `UserStorage`, runtime registry|MU1–MU6 + MU13|
+|A3|2|quota, per-user jobs/backups, admin basics|MU7–MU11|
+|A4|1–3|migration, load/E2E, pilot docs|MU12 + M1–M10|
+
+MVP-B — `8–12 engineer days`:
+
+|stage|days|output|exit|
+|---|---:|---|---|
+|B1|2|shares, roles, share invites, admin membership UI|SH1–SH3|
+|B2|3|workspace copy, release build, copy/follow install|SH4–SH6|
+|B3|2–4|update diff/conflicts, optimistic edits, comments|SH7–SH10|
+|B4|1–3|backup/restore, isolation/load/E2E, operations|SH11–SH12|
+
+Pilot gates:
+
+- MVP-A: ≥`7 days`, ≥`2 users`, daily backup, one restore drill
+- MVP-B: ≥`7 days`, ≥`2 members`, ≥`2 releases`, update conflict drill
+- each phase deployable independently; collaboration ⊥ prerequisite for private accounts
 
 ## 12. Extension Architecture
 
@@ -725,8 +1219,11 @@ Status: `x` done, `~` active, `.` todo.
 |T13|.|cutover `18443`; Webtop read-only fallback|acceptance + user signoff|
 |T14|.|retire Webtop runtime; retain recovery bundle|30-day stable window|
 |T15|.|publish extension API v1|capability + compatibility tests|
-|T16|.|multi-user implementation|per-user isolation/load tests|
-|T17|.|optional sync/offline research|ADR + conflict model|
+|T16|.|concurrent private accounts|MU1–MU13 + migration pilot|
+|T17|.|admin + account/share invitations|admin RBAC + invite abuse tests|
+|T18|.|deck release sharing + subscriptions|SH1–SH8|
+|T19|.|collaboration workspaces|SH9–SH12 + pilot|
+|T20|.|optional native sync/offline research|ADR + conflict model|
 
 ## 19. Phase Detail
 
@@ -759,8 +1256,18 @@ Output: headless server owns production collection; Webtop removed from runtime.
 
 ### P5 — platform
 
-Tasks: T15–T17.
-Output: extensions, users, optional sync/offline based on demand.
+Tasks: T15–T16.
+Output: extension boundary + isolated concurrent accounts.
+
+### P6 — sharing
+
+Tasks: T17–T19.
+Output: administration, invitations, versioned deck sharing, collaborative authoring.
+
+### P7 — optional sync/offline
+
+Task: T20.
+Output: ADR + prototype only after multi-user/share stability.
 
 ## 20. Cutover Runbook
 
@@ -801,6 +1308,12 @@ Rollback action: stop headless writer → restore pre-cutover backup → start p
 |R8|AGPL/trademark obligations|source page; retain notices; distinct product name before distribution|
 |R9|offline expectation mismatch|online-only UI explicit; offline separate ADR|
 |R10|phone + desktop answer same card|review session lease; reject stale answer version|
+|R11|horizontal cross-user data leak|`TenantContext`; UUID roots; IDOR matrix; V16–V18|
+|R12|too many open collections exhaust RAM/FDs|runtime cap; idle eviction; load gate MU12|
+|R13|quota failure leaves partial import|staging + pre/postflight + rollback|
+|R14|shared update destroys local edits/history|base hashes; conflict stop; V23|
+|R15|revoked member retains WS/job access|re-auth @ commit; session/member events; ≤5 s close|
+|R16|admin role becomes content backdoor|metadata-only admin APIs; ⊥ impersonation; V25|
 
 ## 22. Definition of Done — v1 Cutover
 
@@ -835,10 +1348,17 @@ Decide before T15:
 - D6: plugin process isolation level
 - D7: public extension signing/distribution
 
-Decide before T16:
+Decide before T16 (resolved 2026-10-03):
 
-- D8: user provisioning model
-- D9: per-user process vs worker pool
+- D8: provisioning → bootstrap owner + owner/admin one-time invites; ⊥ public signup/email dependency
+- D9: runtime → one serialized worker per active user/share inside one app process; capped registry + idle eviction
+
+Decide before T18 (resolved 2026-10-03):
+
+- D10: sharing → immutable releases copied into private collections; ⊥ shared review DB
+- D11: update → preserve local scheduling; stop on content conflict; tombstones retire, ⊥ delete default
+- D12: collaboration → separate workspace collection + optimistic entity revisions; ⊥ CRDT/live field merge
+- D13: admin privacy → metadata operations only; ⊥ impersonation/content browsing
 
 ## 24. References
 

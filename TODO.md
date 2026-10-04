@@ -11,7 +11,7 @@ File ownership was disjoint per batch so the two branches merge cleanly.
 Test counts: 533 at start of run -> **632** on main (CC work); agy branch 548 (533 + 15). The merged
 tree plus the post-review hardening is covered by **662 tests** (final CI result recorded on the PR).
 
-## Done (CC, committed on feat/modular-mobile-v1, not pushed)
+## Done (CC, committed + pushed on feat/modular-mobile-v1)
 - [x] T3 ADRs 0001-0004 (`docs/adr/`) + import-boundary ratchet test (`tests/test_architecture.py`)
 - [x] T9a fail-closed startup, Origin/Sec-Fetch-Site CSRF check, baseline security headers
       (`ankiweb/security.py`); real-browser proof incl. mutation check (`tests/test_security_integration.py`)
@@ -34,7 +34,7 @@ tree plus the post-review hardening is covered by **662 tests** (final CI result
 - [x] T7b generated TS client from the OpenAPI snapshot + drift test
 
 ## Needs Steven
-- [x] Commits + merge of agy/work done (7 commits + merge; nothing pushed). 647 tests pass on the merged tree.
+- [x] Commits + merge of agy/work done; hardening pushed to PR #1; 662 tests pass.
 - [x] Live pilot was HUNG (100% CPU since 17:10Z). Rebuilt + restarted via pilot.sh: healthy, new API
       verified against the real collection. A byte-identical pre-restart copy of the collection is in the
       session scratchpad (`pre-restart/`, volatile /tmp) if you want it.
@@ -71,5 +71,10 @@ to be THE cause. If it recurs on the rebuilt image (which has the dump handler, 
 - A command-rewriting hook reformats `git`/`grep` output in this shell; script git via Python when exact
   output matters.
 
-## Later (T15-T17)
-- [ ] T15 extension API v1  - [ ] T16 multi-user  - [ ] T17 sync/offline research
+## Later (T15-T20)
+- [ ] T15 extension API v1
+- [ ] T16 concurrent isolated accounts (MU1-MU13)
+- [ ] T17 administration + account/share invitations
+- [ ] T18 versioned deck sharing + subscriptions
+- [ ] T19 collaboration workspaces (SH1-SH12)
+- [ ] T20 optional native sync/offline research
