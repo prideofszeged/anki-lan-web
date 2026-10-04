@@ -53,8 +53,7 @@ def test_change_notetype_spa_boots(live_server_cnt):
         # The change-notetype SPA uses Svelte custom dropdowns (role="combobox") for field/template
         # mapping rather than native <select> elements; there are typically 5 comboboxes + 1 Save
         # button rendered once the info loads (no native <select> or <table> in this SPA).
-        page.wait_for_function("document.querySelectorAll('[role=\"combobox\"],button').length>1", timeout=10000)
-        page.wait_for_function("document.body.innerText.length>20", timeout=10000)
+        page.locator('[role="combobox"],button').nth(1).wait_for(timeout=10000)
         assert not errors, errors
         assert any("get_change_notetype_info" in u.lower() or "getchangenotetypeinfo" in u.lower()
                    for u in posts), posts

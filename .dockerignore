@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+ankiweb/web_assets
+data
+backups
+docs/superpowers
+tests

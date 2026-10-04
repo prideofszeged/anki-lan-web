@@ -1,7 +1,8 @@
 from __future__ import annotations
 import os
 import tempfile
-from fastapi import APIRouter, Form, UploadFile
+from pathlib import Path
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.background import BackgroundTask
 
@@ -29,6 +30,24 @@ from ankiweb.screens.notify import render_notify_html, config_from_form, header_
 
 def build_screen_router(get_service, get_notifier=None) -> APIRouter:
     router = APIRouter()
+
+    async def save_upload(file: UploadFile, dest, request: Request) -> None:
+        """Stream uploads to disk instead of duplicating the whole package in RAM."""
+        limit = getattr(request.state, "upload_limit_bytes", None)
+        written = 0
+        try:
+            with dest.open("wb") as out:
+                while chunk := await file.read(1024 * 1024):
+                    written += len(chunk)
+                    if limit is not None and written > limit:
+                        raise HTTPException(
+                            status_code=507,
+                            detail={"code": "quota_exceeded", "message": "upload quota exceeded"},
+                        )
+                    out.write(chunk)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
 
     @router.get("/", response_class=HTMLResponse)
     @router.get("/deckbrowser", response_class=HTMLResponse)
@@ -156,13 +175,25 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
             ["js/mathjax.js", "js/editor.js"]))
 
     @router.post("/upload_media")
-    async def upload_media(file: UploadFile):
-        data = await file.read()
+    async def upload_media(request: Request, file: UploadFile):
+        import shutil
+
         base = (file.filename or "paste").rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "paste"
+        base = base.replace("\x00", "_")
+        if base in {".", ".."}:
+            base = "paste"
         if "." not in base:
             base += _MIME_EXT.get(file.content_type or "", ".png")
-        fname = await get_service().run(lambda col: col.media.write_data(base, data))
-        return {"filename": fname}
+        service = get_service()
+        service.settings.import_tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="media-", dir=service.settings.import_tmp_dir))
+        dest = directory / base
+        try:
+            await save_upload(file, dest, request)
+            fname = await service.run(lambda col: col.media.add_file(str(dest)))
+            return {"filename": fname}
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
 
     @router.get("/export", response_class=HTMLResponse)
     async def export_page():
@@ -209,9 +240,7 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
                     out_path=out, options=opts, limit=lim))
                 filename, media = "export.apkg", "application/octet-stream"
             elif fmt == "colpkg":
-                await service.run(lambda col: col.export_collection_package(
-                    out, with_media, legacy))
-                await service.reopen()  # export_collection_package closed the collection
+                await service.export_collection_package(out, with_media, legacy)
                 filename, media = "collection.colpkg", "application/octet-stream"
             elif fmt == "notes_csv":
                 lim = make_limit()
@@ -232,14 +261,18 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
                 os.remove(out)
             except OSError:
                 pass
-            body = await service.run(render_export_html)
+            try:
+                body = await service.run(render_export_html)
+            except Exception:
+                body = "<p><a href='/deckbrowser'>Back to decks</a></p>"
             return HTMLResponse(render_page(
-                "export", f"<div style='color:#c00'>Export failed: {exc}</div>" + body))
+                "export", f"<div style='color:#c00'>Export failed: {exc}</div>" + body),
+                status_code=500)
         return FileResponse(out, media_type=media, filename=filename,
                             background=BackgroundTask(os.remove, out))
 
     @router.post("/image-occlusion/upload")
-    async def image_occlusion_upload(file: UploadFile):
+    async def image_occlusion_upload(request: Request, file: UploadFile):
         from fastapi.responses import JSONResponse
         from ankiweb import import_tmp
         service = get_service()
@@ -249,12 +282,12 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
         if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif"):
             return JSONResponse({"error": f"unsupported image type: {ext or '(none)'}"}, status_code=400)
         dest = import_tmp.io_allocate(service.settings, ext)
-        dest.write_bytes(await file.read())
+        await save_upload(file, dest, request)
         await service.run(lambda col: col.add_image_occlusion_notetype())  # idempotent ensure
         return {"path": str(dest)}
 
     @router.post("/import/upload")
-    async def import_upload(file: UploadFile):
+    async def import_upload(request: Request, file: UploadFile):
         from fastapi.responses import JSONResponse
         from ankiweb import import_tmp
         service = get_service()
@@ -267,7 +300,7 @@ def build_screen_router(get_service, get_notifier=None) -> APIRouter:
         if route is None:
             return JSONResponse({"error": f"unsupported file type: {ext or '(none)'}"}, status_code=400)
         dest = import_tmp.allocate(service.settings, ext)
-        dest.write_bytes(await file.read())
+        await save_upload(file, dest, request)
         return {"route": route, "path": str(dest)}
 
     return router

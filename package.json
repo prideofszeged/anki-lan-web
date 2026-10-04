@@ -2,5 +2,9 @@
   "name": "ankiweb-shell",
   "private": true,
   "devDependencies": { "esbuild": "^0.21.0", "typescript": "^5.4.0" },
-  "scripts": { "build": "node tools/build_shell.mjs" }
+  "scripts": {
+    "build": "node tools/build_shell.mjs",
+    "gen:api": "node tools/gen_api_client.mjs",
+    "typecheck": "tsc --noEmit -p packages/contracts/ts"
+  }
 }

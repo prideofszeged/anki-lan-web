@@ -1,0 +1,40 @@
+# LAN TLS front for anki-lan-web (SPEC section 13, ADR 0002).
+# Config only: the `proxy` Compose service is behind the `lan` profile, so nothing listens on
+# :18443 until you run `docker compose --profile lan up -d` after acceptance.
+{
+	admin off
+	# No :80 listener exists, so there is nothing to redirect from.
+	auto_https disable_redirects
+	# Some clients omit SNI for literal IP addresses. Select the LAN certificate anyway.
+	default_sni {$ANKIWEB_LAN_HOST:192.168.1.7}
+}
+
+https://{$ANKIWEB_LAN_HOST:192.168.1.7}:18443 {
+	# The public host/IP selects the certificate and Host matcher. The explicit host-side
+	# Compose port binding provides interface isolation; inside the container Caddy must
+	# listen on its container interface rather than the host's LAN address.
+	bind 0.0.0.0
+	# Private CA kept in the caddy-data volume; trust its root cert on each owned device
+	# (see docs/OPERATIONS.md). Host is deliberately NOT rewritten: the app's CSRF/origin
+	# check compares Origin against the Host the browser actually used.
+	tls internal
+	encode zstd gzip
+
+	reverse_proxy app:8000 {
+		# Active check so a wedged app yields 502 quickly instead of hanging browsers.
+		health_uri /healthz
+		# Active probes otherwise use the upstream address (`app:8000`) as Host, which
+		# the application's DNS-rebinding guard intentionally rejects.
+		health_headers {
+			Host localhost
+		}
+		health_interval 30s
+	}
+
+	header -Server
+
+	log {
+		output stdout
+		format json
+	}
+}

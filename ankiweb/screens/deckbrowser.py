@@ -9,22 +9,26 @@ def _count_span(n: int, cls: str) -> str:
 
 
 def _render_node(node, current_id: int, out: list) -> None:
-    indent = "&nbsp;" * 6 * (node.level - 1)
+    level = max(0, node.level - 1)
     row_class = "deck current" if node.deck_id == current_id else "deck"
     if node.children:
         prefix = "+" if node.collapsed else "−"  # − minus sign
         collapse = (f"<a class='collapse' href='#' "
+                    f"aria-label='Toggle {html.escape(node.name)}' "
+                    f"aria-expanded='{'false' if node.collapsed else 'true'}' "
                     f"onclick='return pycmd(\"collapse:{node.deck_id}\")'>{prefix}</a>")
     else:
-        collapse = "<span class='collapse'></span>"
+        collapse = "<span class='collapse' aria-hidden='true'></span>"
     filtered = " filtered" if node.filtered else ""
     name = (f"<a class='deck{filtered}' href='#' "
             f"onclick=\"return pycmd('open:{node.deck_id}')\">{html.escape(node.name)}</a>")
-    gears = (f"<a class='opts' href='#' onclick='return pycmd(\"opts:{node.deck_id}\")'>"
-             f"<img src='/_anki/imgs/gears.svg' class='gears'></a>")
+    gears = (f"<a class='opts' href='#' aria-label='Options for {html.escape(node.name)}' "
+             f"onclick='return pycmd(\"opts:{node.deck_id}\")'>"
+             f"<img src='/_anki/imgs/gears.svg' class='gears' alt=''></a>")
     out.append(
-        f"<tr class='{row_class}' id='{node.deck_id}'>"
-        f"<td class='decktd'>{indent}{collapse}{name}</td>"
+        f"<tr class='{row_class}' id='{node.deck_id}' data-level='{level}' "
+        f"style='--deck-level:{level}'>"
+        f"<td class='decktd'>{collapse}{name}</td>"
         f"<td align='right' class='count'>{_count_span(node.new_count, 'new-count')}</td>"
         f"<td align='right' class='count'>{_count_span(node.learn_count, 'learn-count')}</td>"
         f"<td align='right' class='count'>{_count_span(node.review_count, 'review-count')}</td>"
@@ -40,15 +44,19 @@ def render_deckbrowser_html(col) -> str:
     tree = col.sched.deck_due_tree()
     current_id = col.decks.get_current_id()
     rows = [
-        f"<tr><th colspan='1' align='left'>{tr.actions_decks()}</th>"
-        f"<th class='count'>{tr.actions_new()}</th><th class='count'>{tr.decks_learn_header()}</th>"
-        f"<th class='count'>{tr.decks_review_header()}</th>"
+        f"<tr><th scope='col' colspan='1' align='left'>{tr.actions_decks()}</th>"
+        f"<th scope='col' class='count'>{tr.actions_new()}</th>"
+        f"<th scope='col' class='count'>{tr.decks_learn_header()}</th>"
+        f"<th scope='col' class='count'>{tr.decks_review_header()}</th>"
         "<th></th></tr>"
     ]
     if tree is not None:
         for child in tree.children:
             _render_node(child, current_id, rows)
-    table = "<table cellspacing='0' cellpadding='3' class='decks'>" + "".join(rows) + "</table>"
+    table = (
+        "<div class='deck-table-wrap'><table cellspacing='0' cellpadding='3' class='decks'>"
+        + "".join(rows) + "</table></div>"
+    )
     studied = f"<div id='studiedToday'><span>{html.escape(col.studied_today())}</span></div>"
     # Deck-management actions only — Decks/Add/Browse/Stats/night live in the global
     # top toolbar (render_page), shown on every screen.
@@ -57,7 +65,11 @@ def render_deckbrowser_html(col) -> str:
               f" <button onclick='ankiwebImportFile()'>{tr.actions_import()}</button>"
               f" <a href='/export'>{tr.actions_export()}</a>"
               f" <button onclick='ankiwebImageOcclusion()'>{tr.notetypes_image_occlusion_name()}</button>")
-    return f"<center>{table}{studied}<div class='dyn-buttons'>{create}</div></center>"
+    return (
+        f"<main class='deck-browser' aria-label='{tr.actions_decks()}'>"
+        f"{table}{studied}<div class='dyn-buttons' aria-label='Deck actions'>{create}</div>"
+        "</main>"
+    )
 
 
 def make_deckbrowser_handler(service, hub):

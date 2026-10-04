@@ -6,8 +6,8 @@ can diff against these points and decide whether ankiweb needs to follow.
 
 ## Runtime dependency — the source of truth for behavior
 
-- **anki (pylib) + the vendored frontend: `25.9.4`** — pinned in `pyproject.toml` as `anki==25.9.4`.
-- The compiled frontend under `ankiweb/web_assets/` (gitignored) is vendored from the **aqt `25.9.4`**
+- **anki (pylib) + the vendored frontend: `26.9.3`** — pinned in `pyproject.toml` as `anki==26.9.3`.
+- The compiled frontend under `ankiweb/web_assets/` (gitignored) is vendored from the **aqt `26.9.3`**
   wheel by `tools/fetch_web_assets.py`.
 
 > **The version pin is load-bearing.** `_rsbridge.so` and the compiled frontend carry a *buildhash*
@@ -24,8 +24,8 @@ These are the local checkouts the port was written against (read for understandi
 | **AnkiConnect** | git.sr.ht/~foosoft/anki-connect | `de6e6e1b8aaf4ae195eb1d1ff6db5409b99b2a3e` | `25.11.9.0` (+1, `master`) | 2025-12-05 |
 
 > ⚠️ The Anki **source** checkout above (`main`, 25.09.2 + 204 commits) is *newer* than the pinned
-> **runtime** `25.9.4` — it was read to understand the code, not version-matched. For an exact
-> source↔runtime diff, check out the `25.9.4` release tag in the anki repo before comparing.
+> **runtime** `26.9.3` — it was read to understand the code, not version-matched. For an exact
+> source↔runtime diff, check out the `26.09.3` release tag in the anki repo before comparing.
 
 ## When upstream updates — what to re-check
 

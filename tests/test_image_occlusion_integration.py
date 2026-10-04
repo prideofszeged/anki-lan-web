@@ -62,7 +62,6 @@ def _boot(url, expect_method):
         page.on("request", lambda r: posts.append(r.url) if r.method == "POST" and "/_anki/" in r.url else None)
         page.goto(url)
         page.wait_for_selector("canvas", timeout=15000)   # MaskEditor's <canvas>
-        page.wait_for_function("document.body.innerText.length>0 || document.querySelector('canvas')", timeout=10000)
         assert not errors, errors
         # The SPA POSTs camelCase RPC names (e.g. getImageForOcclusion); strip underscores for comparison
         assert any(expect_method.lower().replace("_", "") in u.lower() for u in posts), (expect_method, posts)

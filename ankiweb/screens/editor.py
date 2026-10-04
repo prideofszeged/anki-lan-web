@@ -2,6 +2,28 @@ from __future__ import annotations
 import json
 
 
+def editor_state_payload(col, model, fields: list[list], tags: list[str], note_id: int) -> dict:
+    """Build state for Anki 26.09.3's legacy editor setter contract."""
+    flds = model["flds"]
+    cloze_ords = set(col.models.cloze_fields(model["id"]))
+    return {
+        "fields": fields,
+        "fonts": [[f.get("font", "Arial"), int(f.get("size", 20)), bool(f.get("rtl", False))]
+                  for f in flds],
+        "collapsed": [bool(f.get("collapsed", False)) for f in flds],
+        "clozeFields": [i in cloze_ords for i in range(len(flds))],
+        "plainTexts": [bool(f.get("plainText", False)) for f in flds],
+        "descriptions": [f.get("description", "") for f in flds],
+        "io": model.get("originalStockKind") == 6,
+        "noteId": note_id,
+        "meta": {"id": model["id"], "mtimeSecs": model.get("mod", 0)},
+        "tags": tags,
+        "mathjax": bool(col.get_config("renderMathjax", True)),
+        "shrinkImages": bool(col.get_config("shrinkEditorImages", True)),
+        "closeHtmlTags": bool(col.get_config("closeHTMLTags", True)),
+    }
+
+
 def _munge(col, html: str) -> str:
     """editor_will_munge_html equivalent: null-strip, drop bare <br>, unescape media."""
     html = (html or "").replace("\x00", "")
@@ -14,16 +36,9 @@ def _build_load(col, nid: int) -> dict:
     note = col.get_note(nid)
     model = note.note_type()
     flds = model["flds"]
-    return {
-        "fields": [[f["name"], col.media.escape_media_filenames(note.fields[i])]
-                   for i, f in enumerate(flds)],
-        "fonts": [[f.get("font", "Arial"), int(f.get("size", 20)), bool(f.get("rtl", False))]
-                  for f in flds],
-        "io": False,
-        "noteId": nid,
-        "meta": {"id": model["id"], "modTime": model.get("mod", 0)},
-        "tags": list(note.tags),
-    }
+    fields = [[f["name"], col.media.escape_media_filenames(note.fields[i])]
+              for i, f in enumerate(flds)]
+    return editor_state_payload(col, model, fields, list(note.tags), nid)
 
 
 def _save_field(col, nid: int, ord_: int, html: str):
@@ -83,18 +98,32 @@ def editor_links_js() -> str:
 def editor_page_body(nid: int) -> str:
     return (
         f"<script>window.__ankiwebEditNid={int(nid)}</script>"
+        "<div id='editor-save-bar' style='display:none'>"
+        "<button type='button' id='save-btn' class='but' onclick='window.ankiwebSaveNote()'>Save</button>"
+        "</div>"
         "<script>(function(){"
-        "window.setupEditor('browse');"
+        "window.ankiwebSaveNote=function(){if(document.activeElement&&document.activeElement.blur){document.activeElement.blur();}};"
+        "window.setupEditor('browser',true);"
         "var b=window.__ankiwebBridge;"
         "b.registerCalls({ankiwebLoadNote:function(d){"
         "require('anki/ui').loaded.then(function(){"
-        "window.setFields(d.fields);"
-        "window.setIsImageOcclusion(d.io);"
-        "window.setFonts(d.fonts);"
+        "var names=d.fields.map(function(f){return f[0];});"
+        "var values=d.fields.map(function(f){return f[1];});"
         "window.setNotetypeMeta(d.meta);"
         "window.__ankiwebNotetypeId=d.meta.id;"
+        "window.setFields(names,values);"
+        "window.setIsImageOcclusion(d.io);"
+        "window.setFonts(d.fonts);"
+        "window.setCollapsed(d.collapsed);"
+        "window.setClozeFields(d.clozeFields);"
+        "window.setPlainTexts(d.plainTexts);"
+        "window.setDescriptions(d.descriptions);"
         "window.setNoteId(d.noteId);"
         "window.setTags(d.tags);"
+        "window.setTagsCollapsed(false);"
+        "window.setMathjaxEnabled(d.mathjax);"
+        "window.setShrinkImages(d.shrinkImages);"
+        "window.setCloseHTMLTags(d.closeHtmlTags);"
         "window.triggerChanges();"
         "});}});"
         "require('anki/ui').loaded.then(function(){"

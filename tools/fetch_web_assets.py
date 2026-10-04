@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-AQT_VERSION = "25.9.4"
+AQT_VERSION = "26.9.3"
 DEST = Path(__file__).resolve().parent.parent / "ankiweb" / "web_assets"
 REQUIRED = ["js/reviewer.js", "js/reviewer-bottom.js", "css/reviewer.css",
             "sveltekit/index.html", "pages/congrats.html", "js/vendor/jquery.min.js"]

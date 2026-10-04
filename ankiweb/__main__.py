@@ -1,5 +1,10 @@
 from __future__ import annotations
 import asyncio
+import faulthandler
+import os
+import signal
+import sys
+from pathlib import Path
 import uvicorn
 from ankiweb.config import Settings
 from ankiweb.collection_service import CollectionService
@@ -10,8 +15,39 @@ from ankiweb.ankiconnect.app import create_ankiconnect_app
 from ankiweb.notifier import NotifierState, DeckNotifier, snapshot
 
 
+def enable_diagnostics() -> None:
+    """Make a wedged server diagnosable without py-spy/ptrace (the image has neither):
+    `docker kill -s USR1 anki-lan-web` then `docker logs anki-lan-web` shows every thread's
+    stack. faulthandler runs at C level, so it works even when the event loop is spinning."""
+    faulthandler.enable()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+
+
 async def _serve() -> None:
     settings = Settings.from_env()
+    if (problem := settings.auth_error()):
+        raise SystemExit(f"refusing to start: {problem}")
+    settings.import_tmp_dir.mkdir(parents=True, exist_ok=True)
+    if tmpdir := os.environ.get("TMPDIR"):
+        tmp_path = Path(tmpdir)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        # Exports use tempfile's `tmp*` names. Remove only our stale regular files;
+        # TMPDIR is configurable and may contain unrelated content.
+        for stale in tmp_path.glob("tmp*"):
+            if stale.is_file() or stale.is_symlink():
+                stale.unlink(missing_ok=True)
+    if settings.multi_user:
+        # Multi-user mode deliberately exposes only the authenticated web transport.
+        # Legacy AnkiConnect has process-global collection state and remains disabled.
+        from ankiweb.multiuser_app import create_multi_user_app
+
+        web = create_multi_user_app(settings)
+        server = uvicorn.Server(uvicorn.Config(
+            web, host=settings.host, port=settings.port, log_level="info",
+        ))
+        await server.serve()
+        return
     ac_config = AnkiConnectConfig.load(settings.collection_path.parent / "ankiconnect.json")
     service = CollectionService(settings)
     await service.open()
@@ -41,6 +77,11 @@ async def _serve() -> None:
 
 
 def main() -> None:
+    enable_diagnostics()
+    if len(sys.argv) > 1 and sys.argv[1] == "user":
+        from ankiweb.identity.cli import run_identity_cli
+
+        raise SystemExit(run_identity_cli(sys.argv[2:]))
     asyncio.run(_serve())
 
 

@@ -1,13 +1,17 @@
 from __future__ import annotations
+import asyncio
 import html
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from ankiweb.config import Settings, host_allowed
-from ankiweb.auth import COOKIE, auth_token, cookie_ok, password_ok
+from ankiweb.auth import COOKIE, LoginLimiter, SessionStore, login_client, password_ok
+from ankiweb.security import origin_ok, security_headers
+from ankiweb.api.v1 import PREFIX as API_PREFIX, PUBLIC_PATHS as API_PUBLIC, build_api_router
 
 
 def _login_html(error: bool = False) -> str:
@@ -42,6 +46,9 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
                hub: BridgeHub | None = None, notifier=None) -> FastAPI:
     settings = settings or Settings.from_env()
     owns = service is None
+    sessions = SessionStore()
+    login_limiter = LoginLimiter()
+    auth_enabled = bool(settings.password or settings.password_hash)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -65,27 +72,44 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     app = FastAPI(title="ankiweb", lifespan=lifespan)
 
-    async def host_guard(request, call_next):
+    extra_headers = security_headers(hsts=settings.secure_cookie)
+
+    def _gate(path: str):
+        """Response for an unauthenticated request, or None when the path is public:
+        JSON 401 for the API, a redirect to the login form for pages."""
+        if path.startswith(API_PREFIX + "/"):
+            return None if path in API_PUBLIC else JSONResponse(
+                {"detail": "unauthenticated"}, status_code=401)
+        return None if path in ("/login", "/logout", "/healthz") else RedirectResponse(
+            "/login", status_code=303)
+
+    async def guard(request, call_next):
+        """One ordered gate so the baseline headers land on every response, including the
+        403/303 short-circuits: host (DNS-rebinding) -> origin (CSRF, V8) -> session."""
         host = request.headers.get("host", "")
+        session_ok = auth_enabled and sessions.valid(request.cookies.get(COOKIE))
         if not host_allowed(host, settings.allowed_hosts):
-            return PlainTextResponse("forbidden host", status_code=403)
-        return await call_next(request)
+            resp = PlainTextResponse("forbidden host", status_code=403)
+        elif not origin_ok(request.method, request.headers, host, settings.allowed_hosts,
+                           has_session=session_ok):
+            resp = PlainTextResponse("cross-origin request blocked", status_code=403)
+        # Only gates when a password is configured (startup refuses to run without one unless
+        # ANKIWEB_AUTH_DISABLED). /login, /logout, /healthz stay reachable for the login form.
+        elif auth_enabled and not session_ok and (denied := _gate(request.url.path)):
+            resp = denied
+        else:
+            resp = await call_next(request)
+        for name, value in extra_headers.items():
+            resp.headers.setdefault(name, value)
+        return resp
 
-    app.add_middleware(BaseHTTPMiddleware, dispatch=host_guard)
-
-    async def auth_guard(request, call_next):
-        # Open by default; only gates when ANKIWEB_PASSWORD is set. /login, /logout, /healthz
-        # stay reachable so an unauthenticated user can reach the login form.
-        if settings.password and request.url.path not in ("/login", "/logout", "/healthz"):
-            if not cookie_ok(request.cookies.get(COOKIE), settings.password):
-                return RedirectResponse("/login", status_code=303)
-        return await call_next(request)
-
-    app.add_middleware(BaseHTTPMiddleware, dispatch=auth_guard)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=guard)
 
     # --- specific routes FIRST, media catch-all LAST (Starlette matches in order) ---
     @app.get("/healthz")
     def healthz():
+        # Docker/Caddy liveness must remain responsive while the serialized collection
+        # worker is busy. Collection readiness lives at /api/v1/health/ready.
         return {"ok": True}
 
     @app.get("/login", response_class=HTMLResponse)
@@ -95,27 +119,51 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     @app.post("/login")
     async def login_submit(request: Request):
+        client = login_client(request, settings.trusted_proxy_cidrs)
+        if not login_limiter.allow(client):
+            return HTMLResponse(_login_html(error=True), status_code=429)
         form = await request.form()
-        if settings.password and password_ok(form.get("password", ""), settings.password):
+        accepted = auth_enabled and await asyncio.to_thread(
+            password_ok, form.get("password", ""), settings.password, settings.password_hash)
+        if accepted:
+            login_limiter.reset(client)
             resp = RedirectResponse("/", status_code=303)
-            resp.set_cookie(COOKIE, auth_token(settings.password),
-                            httponly=True, samesite="lax", max_age=30 * 86400)
+            resp.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",
+                            secure=settings.secure_cookie, max_age=sessions.max_age)
             return resp
         return HTMLResponse(_login_html(error=True), status_code=401)
 
     @app.get("/logout")
-    def logout():
+    def logout(request: Request):
+        sessions.revoke(request.cookies.get(COOKIE))
         resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie(COOKIE)
         return resp
 
+    app.include_router(build_api_router(lambda: app.state.service, sessions, login_limiter,
+                                        settings, auth_enabled))   # /api/v1/*
+
     static_dir = settings.shell_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker():
+        return FileResponse(
+            static_dir / "sw.js",
+            media_type="application/javascript",
+            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+        )
+
     app.mount("/shell/static", StaticFiles(directory=str(static_dir), check_dir=False), name="shell")
 
     app.include_router(build_assets_router(settings.assets_dir))       # GET  /_anki/{path}
     app.include_router(build_rpc_router(lambda: app.state.service, lambda: app.state.hub))    # POST /_anki/{method}
-    app.include_router(build_ws_router(lambda: app.state.hub, settings.allowed_hosts, settings.password))  # WS /ws
+    app.include_router(build_ws_router(
+        lambda: app.state.hub,
+        settings.allowed_hosts,
+        (lambda token: not auth_enabled or sessions.valid(token)),
+        auth_required=auth_enabled,
+    ))  # WS /ws
     app.include_router(build_screen_router(lambda: app.state.service, lambda: app.state.notifier))  # GET / + /notify
     app.include_router(build_sveltekit_router(settings.assets_dir))     # GET  /graphs, /_app/{path}, /favicon.ico
     app.include_router(build_media_router(lambda: app.state.service))  # GET  /{path} — LAST

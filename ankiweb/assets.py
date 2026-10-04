@@ -14,6 +14,11 @@ _SPA_BRIDGE = (
     "location.href='/browse?q='+encodeURIComponent(c.slice(14));}}catch(e){}};</script>"
 )
 
+_SPA_NAV_TAGS = (
+    '<link rel="stylesheet" href="/shell/static/spa-nav.css">'
+    '<script src="/shell/static/spa-nav.js" defer></script>'
+)
+
 # subset of mediasrv _mime_for_path (mediasrv.py:171-210)
 MIME = {
     ".css": "text/css", ".js": "application/javascript", ".mjs": "application/javascript",
@@ -106,40 +111,44 @@ def build_sveltekit_router(assets_dir: Path) -> APIRouter:
     router = APIRouter()
     index = assets_dir / "sveltekit" / "index.html"
 
-    def _shell_with_bridge() -> str:
+    def _render_shell(include_bridge: bool = False) -> str:
         html = index.read_text(encoding="utf-8")
-        return html.replace("<head>", "<head>" + _SPA_BRIDGE, 1)
+        injections = []
+        if include_bridge:
+            injections.append(_SPA_BRIDGE)
+        injections.append(_SPA_NAV_TAGS)
+        return html.replace("<head>", "<head>" + "".join(injections), 1)
 
     @router.get("/graphs")
     def graphs_page() -> Response:
         # served with the browserSearch bridge so the stats count-links open /browse
-        return HTMLResponse(_shell_with_bridge())
+        return HTMLResponse(_render_shell(include_bridge=True))
 
     @router.get("/deck-options/{deck_id}")
     def deck_options_page(deck_id: str) -> Response:
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/change-notetype/{ids:path}")
     def change_notetype_page(ids: str) -> Response:
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/card-info/{ids:path}")
     def card_info_page(ids: str) -> Response:
         # SvelteKit route nodes: /card-info/[cardId] and /card-info/[cardId]/[previousId].
         # Bundle is vendored; card_stats / get_review_logs are already PASSTHROUGH RPCs.
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/import-csv/{path:path}")
     def import_csv_page(path: str) -> Response:
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/import-anki-package/{path:path}")
     def import_anki_package_page(path: str) -> Response:
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/image-occlusion/{path:path}")
     def image_occlusion_page(path: str) -> Response:
-        return FileResponse(index, media_type="text/html")
+        return HTMLResponse(_render_shell())
 
     @router.get("/_app/{path:path}")
     def app_asset(path: str) -> Response:

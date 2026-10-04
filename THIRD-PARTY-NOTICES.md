@@ -11,16 +11,16 @@ ankiweb Copyright (C) 2026 tsc &lt;xxj.tan@gmail.com&gt;.
 
 ## Anki — `anki` pylib (linked at runtime) + vendored compiled frontend
 
-- Upstream: <https://github.com/ankitects/anki> (version **25.9.4**; `aqt` 25.9.4)
+- Upstream: <https://github.com/ankitects/anki> (version **26.9.3**; `aqt` 26.9.3)
 - Copyright (C) Ankitects Pty Ltd and the Anki contributors (see upstream `CONTRIBUTORS`)
 - License: **AGPL-3.0-or-later**, with some user contributions under **BSD-3-Clause**.
 
 ankiweb `import`s the `anki` Python library (collection, scheduler, Rust backend) at
-runtime, and vendors Anki's **compiled frontend** — extracted from the `aqt` 25.9.4 wheel
+runtime, and vendors Anki's **compiled frontend** — extracted from the `aqt` 26.9.3 wheel
 (`_aqt/data/web/`: the SvelteKit SPA, `reviewer.js`, `editor.js`, the congrats page, CSS) by
 `tools/fetch_web_assets.py` into `ankiweb/web_assets/` — and serves those bundles unmodified
 (`/_anki/...`, `/_app/...`). Those compiled bundles are Anki object code under
-AGPL-3.0-or-later. The **Corresponding Source** for them is the Anki/aqt 25.9.4 source at the
+AGPL-3.0-or-later. The **Corresponding Source** for them is the Anki/aqt 26.9.3 source at the
 upstream repository above.
 
 Anki's logo is Copyright Alex Fraser, licensed under AGPL-3.0. (Upstream's limited
@@ -62,5 +62,5 @@ AGPL-3.0-or-later combined work while remaining GPL-3.0-or-later in origin.
 Because ankiweb is a network service, every user interacting with it over a network is
 entitled to the Corresponding Source of the running version. The app exposes a **Source**
 link (top toolbar → `/about`); set `ANKIWEB_SOURCE_URL` to the location of your deployed
-source. The pinned Anki/aqt 25.9.4 source is at <https://github.com/ankitects/anki> and the
+source. The pinned Anki/aqt 26.9.3 source is at <https://github.com/ankitects/anki> and the
 AnkiConnect source at <https://github.com/FooSoft/anki-connect>.

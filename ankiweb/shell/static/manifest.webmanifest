@@ -1,0 +1,11 @@
+{
+  "name": "Anki LAN Web",
+  "short_name": "Anki LAN",
+  "start_url": "/deckbrowser",
+  "display": "standalone",
+  "background_color": "#17191d",
+  "theme_color": "#2563eb",
+  "icons": [
+    {"src": "/shell/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
+  ]
+}

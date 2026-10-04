@@ -34,7 +34,7 @@ def render_about_html(settings) -> str:
         f"<p><strong>This deployment's source:</strong> {src_line}</p>"
         "<p><strong>Upstream sources it derives from and bundles:</strong></p>"
         "<ul>"
-        f"<li>Anki / aqt 25.9.4 — AGPL-3.0-or-later — "
+        f"<li>Anki / aqt 26.9.3 — AGPL-3.0-or-later — "
         f"<a href='{_ANKI_SRC}' target='_blank' rel='noopener'>{_ANKI_SRC}</a></li>"
         f"<li>AnkiConnect — GPL-3.0-or-later — "
         f"<a href='{_AC_SRC}' target='_blank' rel='noopener'>{_AC_SRC}</a></li>"
