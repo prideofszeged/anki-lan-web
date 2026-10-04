@@ -220,12 +220,23 @@ def _migration_5(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_6(conn: sqlite3.Connection) -> None:
+    # Existing v5 artifacts have no trustworthy manifest digest. Keep the column
+    # nullable so the migration is non-destructive; release validation fails closed
+    # for those rows and requires them to be republished.
+    conn.execute(
+        """ALTER TABLE share_releases ADD COLUMN manifest_sha256 TEXT
+           CHECK(manifest_sha256 IS NULL OR length(manifest_sha256)=64)"""
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, "identity control tables", _migration_1),
     (2, "identity lookup indexes", _migration_2),
     (3, "durable job journals", _migration_3),
     (4, "share membership and invitations", _migration_4),
     (5, "immutable releases and subscriptions", _migration_5),
+    (6, "bind immutable release manifests", _migration_6),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -44,6 +44,7 @@ def _stack(tmp_path):
         _, shared_deck = _add_note(
             col, "Shared Greek", "γειά [sound:shared.mp3]", "hello",
         )
+        _add_note(col, "Shared Greek::Verbs", "μιλάω", "I speak")
         _add_note(col, "Private Notes", "secret [sound:private.mp3]", "private")
     finally:
         col.close()
@@ -94,8 +95,8 @@ def test_sh4_workspace_is_selected_deck_only_and_release_is_immutable(tmp_path):
     )
     col = Collection(str(workspace.collection), server=False)
     try:
-        fronts = [col.get_note(note_id)["Front"] for note_id in col.find_notes("")]
-        assert fronts == ["γειά [sound:shared.mp3]"]
+        fronts = {col.get_note(note_id)["Front"] for note_id in col.find_notes("")}
+        assert fronts == {"γειά [sound:shared.mp3]", "μιλάω"}
         assert (workspace.media / "shared.mp3").exists()
         assert not (workspace.media / "private.mp3").exists()
     finally:
@@ -120,6 +121,12 @@ def test_sh4_workspace_is_selected_deck_only_and_release_is_immutable(tmp_path):
     ).version == 1
     with pytest.raises(ImmutableReleaseError):
         publisher.publish(actor_user_id=owner.id, share_id=share.id, version=1)
+    original_manifest = release.manifest_path.read_bytes()
+    manifest["created_at"] = "tampered"
+    release.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ImmutableReleaseError, match="manifest checksum"):
+        publisher.validate_release(actor_user_id=owner.id, share_id=share.id, version=1)
+    release.manifest_path.write_bytes(original_manifest)
     release.bundle_path.write_bytes(release.bundle_path.read_bytes() + b"corrupt")
     with pytest.raises(ImmutableReleaseError, match="checksum"):
         publisher.validate_release(actor_user_id=owner.id, share_id=share.id, version=1)
@@ -178,7 +185,7 @@ def test_sh6_follow_install_maps_entities_and_preserves_history(tmp_path):
     mappings = repository.list_subscription_entities(
         actor_user_id=recipient.id, subscription_id=result.subscription_id,
     )
-    assert len([item for item in mappings if item.entity_type == "note"]) == 1
+    assert len([item for item in mappings if item.entity_type == "note"]) == 2
     assert _schedule_snapshot(storage.user_paths(recipient.id).collection, card_id) == before
     with pytest.raises(AuthorizationError):
         installer.install(

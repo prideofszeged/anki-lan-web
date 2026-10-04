@@ -61,7 +61,8 @@ def _release(row: sqlite3.Row) -> ShareRelease:
     return ShareRelease(
         id=row["id"], share_id=row["share_id"], version=row["version"],
         manifest_path=row["manifest_path"], bundle_path=row["bundle_path"],
-        bundle_sha256=row["bundle_sha256"], created_by=row["created_by"],
+        manifest_sha256=row["manifest_sha256"], bundle_sha256=row["bundle_sha256"],
+        created_by=row["created_by"],
         created_at=_datetime(row["created_at"]),
     )
 
@@ -332,7 +333,8 @@ class SharingRepository:
 
     def commit_release(
         self, *, actor_user_id: str, share_id: str, version: int,
-        manifest_path: str, bundle_path: str, bundle_sha256: str, now: datetime,
+        manifest_path: str, bundle_path: str, manifest_sha256: str,
+        bundle_sha256: str, now: datetime,
     ) -> ShareRelease:
         with self.database.transaction() as conn:
             self._require_owner(conn, share_id, actor_user_id)
@@ -345,9 +347,10 @@ class SharingRepository:
             release_id = str(uuid.uuid4())
             conn.execute(
                 """INSERT INTO share_releases(id,share_id,version,manifest_path,bundle_path,
-                   bundle_sha256,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                   manifest_sha256,bundle_sha256,created_by,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
                 (release_id, share_id, version, manifest_path, bundle_path,
-                 bundle_sha256, actor_user_id, _epoch(now)),
+                 manifest_sha256, bundle_sha256, actor_user_id, _epoch(now)),
             )
             conn.execute(
                 "UPDATE deck_shares SET current_release=?,state='active' WHERE id=?",
@@ -355,7 +358,11 @@ class SharingRepository:
             )
             self._audit(
                 conn, now=now, actor=actor_user_id, action="share.release.published",
-                share_id=share_id, metadata={"version": version, "sha256": bundle_sha256},
+                share_id=share_id, metadata={
+                    "version": version,
+                    "bundle_sha256": bundle_sha256,
+                    "manifest_sha256": manifest_sha256,
+                },
             )
             return _release(conn.execute(
                 "SELECT * FROM share_releases WHERE id=?", (release_id,)

@@ -76,6 +76,7 @@ class ShareRelease:
     version: int
     manifest_path: str
     bundle_path: str
+    manifest_sha256: str | None
     bundle_sha256: str
     created_by: str
     created_at: datetime

@@ -36,6 +36,7 @@ class PublishedRelease:
     version: int
     manifest_path: Path
     bundle_path: Path
+    manifest_sha256: str
     bundle_sha256: str
 
 
@@ -136,11 +137,21 @@ def _copy_tree(source: Path, target: Path) -> None:
 def _export_deck(collection: Path, deck_id: int, package: Path) -> None:
     col = Collection(str(collection), server=False)
     try:
-        if col.decks.get(deck_id, default=False) is None:
+        deck = col.decks.get(deck_id, default=False)
+        if deck is None:
             raise ValueError("source deck not found")
         # The current backend's deck/note ExportLimit includes unrelated notes. Prune only
-        # the disposable snapshot, then export its whole remaining collection.
-        selected = set(col.db.list("SELECT DISTINCT nid FROM cards WHERE did=?", deck_id))
+        # the disposable snapshot to the chosen deck hierarchy, then export it whole.
+        root_name = deck["name"]
+        subtree_ids = sorted(
+            int(candidate.id)
+            for candidate in col.decks.all_names_and_ids()
+            if candidate.name == root_name or candidate.name.startswith(f"{root_name}::")
+        )
+        marks = ",".join("?" for _ in subtree_ids)
+        selected = set(col.db.list(
+            f"SELECT DISTINCT nid FROM cards WHERE did IN ({marks})", *subtree_ids,
+        ))
         outside = set(col.find_notes("")) - selected
         if outside:
             col.remove_notes(list(outside))
@@ -280,6 +291,7 @@ class ReleasePublisher:
                     json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                     encoding="utf-8",
                 )
+                manifest_sha = _sha256(manifest_path)
                 self._validate_reimport(bundle, manifest)
                 self._check_owner_quota(share.owner_user_id, paths.root)
                 _secure_tree(stage)
@@ -289,12 +301,13 @@ class ReleasePublisher:
                     actor_user_id=actor_user_id, share_id=share_id, version=requested,
                     manifest_path=f"releases/{requested}/manifest.json",
                     bundle_path=f"releases/{requested}/deck.apkg",
-                    bundle_sha256=bundle_sha, now=self._clock(),
+                    manifest_sha256=manifest_sha, bundle_sha256=bundle_sha,
+                    now=self._clock(),
                 )
                 return PublishedRelease(
                     share_id=share_id, version=record.version,
                     manifest_path=final / "manifest.json", bundle_path=final / "deck.apkg",
-                    bundle_sha256=bundle_sha,
+                    manifest_sha256=manifest_sha, bundle_sha256=bundle_sha,
                 )
             except BaseException:
                 if stage.exists() and not stage.is_symlink():
@@ -319,6 +332,9 @@ class ReleasePublisher:
                 record.bundle_path != f"releases/{version}/deck.apkg":
             raise ImmutableReleaseError("release path metadata is invalid")
         _safe_files(expected_manifest.parent)
+        if record.manifest_sha256 is None or \
+                _sha256(expected_manifest) != record.manifest_sha256:
+            raise ImmutableReleaseError("release manifest checksum mismatch")
         if _sha256(expected_bundle) != record.bundle_sha256:
             raise ImmutableReleaseError("release bundle checksum mismatch")
         try:
@@ -330,7 +346,8 @@ class ReleasePublisher:
             raise ImmutableReleaseError("release manifest identity mismatch")
         return PublishedRelease(
             share_id=share_id, version=version, manifest_path=expected_manifest,
-            bundle_path=expected_bundle, bundle_sha256=record.bundle_sha256,
+            bundle_path=expected_bundle, manifest_sha256=record.manifest_sha256,
+            bundle_sha256=record.bundle_sha256,
         )
 
     def _manifest(
