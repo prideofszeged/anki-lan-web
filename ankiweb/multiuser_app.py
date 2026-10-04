@@ -20,7 +20,9 @@ from ankiweb.assets import (
 from ankiweb.auth import LoginLimiter, SessionStore, login_client
 from ankiweb.adapters.anki.collaboration import SubscriptionUpdater
 from ankiweb.config import Settings, host_allowed
-from ankiweb.identity import IdentityDatabase, IdentityRepository, IdentityService
+from ankiweb.identity import (
+    IdentityDatabase, IdentityRepository, IdentityService, JobRepository,
+)
 from ankiweb.identity.http import (
     IDENTITY_COOKIE,
     IdentityPrincipal,
@@ -31,6 +33,7 @@ from ankiweb.security import origin_ok, security_headers
 from ankiweb.sharing import ShareRole, SharingRepository, SharingService
 from ankiweb.sharing.http import build_sharing_router
 from ankiweb.sharing.events import ShareSocketRegistry
+from ankiweb.sharing.jobs import SharingJobRunner
 from ankiweb.tenancy import (
     ResourceKey,
     RuntimeCapacityError,
@@ -263,6 +266,12 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         idle_seconds=settings.runtime_idle_seconds,
         wait_seconds=settings.runtime_wait_seconds,
     )
+    sharing_jobs = SharingJobRunner(
+        jobs=JobRepository(identity.repository.database),
+        sharing=sharing.repository,
+        storage=storage,
+        registry=registry,
+    )
     limiter = LoginLimiter()
     identity_http = build_identity_http(
         identity,
@@ -309,6 +318,8 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         ready = True
         app.state.identity = identity
         app.state.runtime_registry = registry
+        app.state.sharing_jobs = sharing_jobs
+        await sharing_jobs.start()
         task = asyncio.create_task(maintenance())
         try:
             yield
@@ -316,6 +327,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
             ready = False
             task.cancel()
             await task
+            await sharing_jobs.stop()
             await registry.drain(wait_seconds=settings.runtime_wait_seconds)
 
     app = FastAPI(title="ankiweb multi-user", lifespan=lifespan)
@@ -335,6 +347,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
             f"{API_PREFIX}/admin/",
             f"{API_PREFIX}/account-invites/",
             f"{API_PREFIX}/shares",
+            f"{API_PREFIX}/jobs/",
             f"{API_PREFIX}/share-invitations/",
             f"{API_PREFIX}/health/",
         ))
@@ -508,7 +521,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
     app.include_router(identity_http.router)
     app.include_router(build_sharing_router(
         sharing, identity_http, connections=share_sockets,
-        allowed_hosts=settings.allowed_hosts,
+        allowed_hosts=settings.allowed_hosts, job_runner=sharing_jobs,
     ))
     app.include_router(build_api_router(
         get_service,

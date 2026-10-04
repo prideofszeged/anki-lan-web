@@ -209,7 +209,7 @@ class RuntimeRegistry(Generic[RuntimeT]):
                 if claimed:
                     self._maintenance.discard(key)
                 current = self._entries.get(key)
-                if current is entry and close_task is None:
+                if current is entry and current is not None and close_task is None:
                     current.evict_when_idle = False
                 self._condition.notify_all()
 

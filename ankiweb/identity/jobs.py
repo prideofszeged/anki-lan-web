@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .database import IdentityDatabase
 from .repository import ConflictError, NotFoundError
@@ -86,29 +86,38 @@ class JobRepository:
         idempotency_key: str,
         request_hash: bytes,
         now: datetime,
+        progress: Mapping[str, Any] | None = None,
     ) -> tuple[Job, bool]:
         if not idempotency_key or len(idempotency_key) > 256:
             raise ValueError("idempotency key must contain 1 to 256 characters")
         if len(request_hash) != 32:
             raise ValueError("request hash must be SHA-256")
+        payload = json.dumps(progress or {}, separators=(",", ":"), sort_keys=True)
+        if len(payload.encode()) > 64 * 1024:
+            raise ValueError("job progress exceeds 64 KiB")
         with self.database.transaction() as conn:
             existing = conn.execute(
                 "SELECT * FROM jobs WHERE actor_user_id=? AND idempotency_key=?",
                 (actor_user_id, idempotency_key),
             ).fetchone()
             if existing:
-                if bytes(existing["request_hash"]) != request_hash:
+                if (
+                    bytes(existing["request_hash"]) != request_hash
+                    or existing["resource_type"] != resource_type
+                    or existing["resource_id"] != resource_id
+                    or existing["capability"] != capability
+                ):
                     raise ConflictError("idempotency key was used for a different request")
                 return _job(existing), False
             job_id = str(uuid.uuid4())
             conn.execute(
                 """INSERT INTO jobs(
                    id, actor_user_id, resource_type, resource_id, capability, state,
-                   idempotency_key, request_hash, created_at)
-                   VALUES(?,?,?,?,?,'queued',?,?,?)""",
+                   idempotency_key, request_hash, progress_json, created_at)
+                   VALUES(?,?,?,?,?,'queued',?,?,?,?)""",
                 (
                     job_id, actor_user_id, resource_type, resource_id, capability,
-                    idempotency_key, request_hash, _epoch(now),
+                    idempotency_key, request_hash, payload, _epoch(now),
                 ),
             )
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -119,6 +128,39 @@ class JobRepository:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             return _job(row) if row else None
 
+    def get_for_actor(self, job_id: str, *, actor_user_id: str) -> Job | None:
+        """Return a job only to its submitting actor (horizontal-IDOR boundary)."""
+        with self.database.read() as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE id=? AND actor_user_id=?",
+                (job_id, actor_user_id),
+            ).fetchone()
+            return _job(row) if row else None
+
+    def list_recoverable(self, *, capability: str) -> list[Job]:
+        with self.database.read() as conn:
+            rows = conn.execute(
+                """SELECT * FROM jobs WHERE capability=? AND state IN ('queued','running')
+                   ORDER BY created_at,id""",
+                (capability,),
+            ).fetchall()
+            return [_job(row) for row in rows]
+
+    def requeue_running(self, job_id: str) -> Job:
+        """Requeue one interrupted job during single-owner startup recovery."""
+        with self.database.transaction() as conn:
+            changed = conn.execute(
+                """UPDATE jobs SET state='queued', generation=generation+1,
+                   error_code=NULL, started_at=NULL, finished_at=NULL
+                   WHERE id=? AND state='running'""",
+                (job_id,),
+            ).rowcount
+            if not changed:
+                if not conn.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone():
+                    raise NotFoundError("job not found")
+                raise ConflictError("job state changed concurrently")
+            return _job(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
     def transition(
         self,
         job_id: str,
@@ -128,6 +170,7 @@ class JobRepository:
         now: datetime,
         progress: Mapping[str, Any] | None = None,
         error_code: str | None = None,
+        guard: Callable[[], object] | None = None,
     ) -> Job:
         allowed = {
             JobState.QUEUED: {JobState.RUNNING, JobState.CANCELLED},
@@ -137,7 +180,12 @@ class JobRepository:
         }
         if target not in allowed.get(expected, set()):
             raise ValueError(f"invalid job transition: {expected.value} -> {target.value}")
-        payload = json.dumps(progress or {}, separators=(",", ":"), sort_keys=True)
+        if progress is None:
+            current = self.get(job_id)
+            if current is None:
+                raise NotFoundError("job not found")
+            progress = current.progress
+        payload = json.dumps(progress, separators=(",", ":"), sort_keys=True)
         if len(payload.encode()) > 64 * 1024:
             raise ValueError("job progress exceeds 64 KiB")
         started_at = _epoch(now) if target is JobState.RUNNING else None
@@ -145,6 +193,11 @@ class JobRepository:
             JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED,
         } else None
         with self.database.transaction() as conn:
+            # BEGIN IMMEDIATE is already held. A guard reading this same database
+            # therefore sees all prior authorization changes and blocks new writers
+            # until the guarded transition commits.
+            if guard is not None:
+                guard()
             changed = conn.execute(
                 """UPDATE jobs SET state=?, generation=generation+1, progress_json=?,
                    error_code=?, started_at=COALESCE(started_at, ?), finished_at=?

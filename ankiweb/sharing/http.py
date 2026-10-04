@@ -26,6 +26,34 @@ from .repository import ShareNotFoundError
 from .service import SharingService
 
 
+class WorkspaceProvisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    deck_id: int = Field(gt=0)
+
+
+class JobResponse(BaseModel):
+    id: str
+    resource_type: str
+    resource_id: str
+    capability: str
+    state: str
+    progress: dict[str, Any]
+    error_code: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @classmethod
+    def of(cls, job) -> "JobResponse":
+        return cls(
+            id=job.id, resource_type=job.resource_type, resource_id=job.resource_id,
+            capability=job.capability, state=job.state.value,
+            progress=dict(job.progress), error_code=job.error_code,
+            created_at=job.created_at, started_at=job.started_at,
+            finished_at=job.finished_at,
+        )
+
+
 class ShareCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
@@ -155,10 +183,50 @@ async def _call(function, /, *args, **kwargs):
 def build_sharing_router(
     service: SharingService, identity_http: IdentityHttp, *, prefix: str = "/api/v1",
     workspace: Any | None = None, updater: Any | None = None,
+    job_runner: Any | None = None,
     connections: ShareSocketRegistry | None = None, allowed_hosts: tuple[str, ...] = (),
 ) -> APIRouter:
     router = APIRouter(prefix=prefix, tags=["sharing"])
     sockets = connections or ShareSocketRegistry()
+
+    if job_runner is not None:
+        @router.post(
+            "/shares/{share_id}/workspace/provision",
+            response_model=JobResponse, status_code=202,
+        )
+        async def provision_workspace(
+            share_id: str, body: WorkspaceProvisionRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            key = request.headers.get("idempotency-key", "")
+            try:
+                job = await job_runner.enqueue_workspace_provision(
+                    actor_user_id=principal.user.id, share_id=share_id,
+                    deck_id=body.deck_id, idempotency_key=key,
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
+        @router.get("/jobs/{job_id}", response_model=JobResponse)
+        async def get_job(
+            job_id: str,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            job = await asyncio.to_thread(
+                job_runner.jobs.get_for_actor, job_id,
+                actor_user_id=principal.user.id,
+            )
+            if job is None:
+                raise HTTPException(404, {
+                    "code": "not_found", "message": "job not found",
+                })
+            return JobResponse.of(job)
 
     @router.get("/shares", response_model=ShareListResponse)
     async def list_shares(

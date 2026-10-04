@@ -132,6 +132,10 @@ class StorageLayout:
         self._remove_managed_tree(paths.root)
         self._remove_managed_tree(paths.backups)
 
+    def discard_share_workspace(self, share_id: UUID | str) -> None:
+        """Remove only the canonical workspace root, never retained share backups."""
+        self._remove_managed_tree(self.share_paths(share_id).root)
+
     def user_usage_bytes(self, user_id: UUID | str) -> int:
         """Count private collection, media, temp, app state, and retained backups."""
         paths = self.user_paths(user_id)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from anki.collection import Collection
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -129,6 +131,96 @@ def test_collaboration_mutation_routes_remain_fail_closed_until_runtime_exclusio
             },
             json={"target_version": 2},
         ).status_code in {404, 405}
+
+
+def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(tmp_path):
+    settings = _settings(tmp_path)
+    identity, storage = _identity(settings)
+    owner = identity.bootstrap_owner(username="alice", password="safe-password")
+    invite = identity.create_invite(
+        actor_user_id=owner.id, intended_username="bob",
+    )
+    identity.accept_invite(token=invite.token, password="another-safe-password")
+    col = Collection(str(storage.user_paths(owner.id).collection), server=False)
+    try:
+        deck_id = int(col.decks.id("Greek Source"))
+        note = col.new_note(col.models.by_name("Basic"))
+        note["Front"], note["Back"] = "γειά", "hello"
+        col.add_note(note, deck_id)
+    finally:
+        col.close()
+
+    with TestClient(create_multi_user_app(settings)) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "username": "alice", "password": "safe-password",
+        })
+        csrf = login.json()["csrf_token"]
+        share = client.post(
+            "/api/v1/shares",
+            headers={"x-csrf-token": csrf, "origin": "http://testserver"},
+            json={"name": "Greek"},
+        ).json()
+        endpoint = f"/api/v1/shares/{share['id']}/workspace/provision"
+        assert client.post(endpoint, json={"deck_id": deck_id}).status_code == 403
+        submitted = client.post(
+            endpoint,
+            headers={
+                "x-csrf-token": csrf, "origin": "http://testserver",
+                "idempotency-key": "http-provision-1",
+            },
+            json={"deck_id": deck_id},
+        )
+        assert submitted.status_code == 202, submitted.text
+        job_id = submitted.json()["id"]
+        duplicate = client.post(
+            endpoint,
+            headers={
+                "x-csrf-token": csrf, "origin": "http://testserver",
+                "idempotency-key": "http-provision-1",
+            },
+            json={"deck_id": deck_id},
+        )
+        assert duplicate.status_code == 202
+        assert duplicate.json()["id"] == job_id
+        mismatch = client.post(
+            endpoint,
+            headers={
+                "x-csrf-token": csrf, "origin": "http://testserver",
+                "idempotency-key": "http-provision-1",
+            },
+            json={"deck_id": deck_id + 1},
+        )
+        assert mismatch.status_code == 409
+
+        client.cookies.clear()
+        bob_login = client.post("/api/v1/auth/login", json={
+            "username": "bob", "password": "another-safe-password",
+        })
+        assert bob_login.status_code == 200
+        assert client.post(
+            endpoint,
+            headers={
+                "x-csrf-token": bob_login.json()["csrf_token"],
+                "origin": "http://testserver", "idempotency-key": "idor",
+            },
+            json={"deck_id": deck_id},
+        ).status_code == 404
+        assert client.get(f"/api/v1/jobs/{job_id}").status_code == 404
+
+        client.cookies.clear()
+        assert client.post("/api/v1/auth/login", json={
+            "username": "alice", "password": "safe-password",
+        }).status_code == 200
+        for _ in range(200):
+            status = client.get(f"/api/v1/jobs/{job_id}")
+            assert status.status_code == 200
+            if status.json()["state"] in {"succeeded", "failed"}:
+                break
+            time.sleep(0.01)
+        assert status.json()["state"] == "succeeded", status.text
+        assert storage.share_paths(share["id"]).collection.exists()
+
+
 def test_multiuser_app_refuses_to_start_without_an_owner(tmp_path) -> None:
     settings = _settings(tmp_path)
     app = create_multi_user_app(settings)
