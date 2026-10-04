@@ -27,6 +27,8 @@ from ankiweb.identity.http import (
 )
 from ankiweb.screens.routes import build_screen_router
 from ankiweb.security import origin_ok, security_headers
+from ankiweb.sharing import ShareRole, SharingRepository, SharingService
+from ankiweb.sharing.http import build_sharing_router
 from ankiweb.tenancy import (
     ResourceKey,
     RuntimeCapacityError,
@@ -139,6 +141,7 @@ def _account_html(user, sessions, *, csrf_cookie_name: str) -> str:
         f"{html.escape((user.display_name or user.username)[0].upper())}</span><div><h1>"
         f"{html.escape(user.display_name or user.username)}</h1><p>@{html.escape(user.username)} · "
         f"{html.escape(user.global_role.value.title())}</p></div><div class='top-actions'>"
+        "<a href='/shares'>Shared decks</a>"
         "<a href='/deckbrowser'>Back to decks</a><button id='logout' class='danger'>Sign out</button>"
         f"</div></header>{invite}<section><h2>Active sessions</h2><ul>{rows}</ul></section>"
         "</main><script>"
@@ -156,6 +159,90 @@ def _account_html(user, sessions, *, csrf_cookie_name: str) -> str:
         "document.getElementById('copy-token').onclick=()=>navigator.clipboard.writeText(v.token)};"
         "</script></body></html>"
     )
+
+
+def _shares_html(details, names: dict[str, str], *, csrf_cookie_name: str) -> str:
+    cards: list[str] = []
+    for detail in details:
+        share = detail.share
+        members = "".join(
+            "<li><span>" + html.escape(names.get(member.user_id, member.user_id)) +
+            "</span><small>" + html.escape(member.role.value.title()) + "</small>" +
+            ("<button class='remove-member' data-share='" + html.escape(share.id) +
+             "' data-user='" + html.escape(member.user_id) + "'>Remove</button>"
+             if detail.membership.role is ShareRole.OWNER and member.role is not ShareRole.OWNER
+             else "") + "</li>"
+            for member in detail.members
+        )
+        owner_tools = ""
+        if detail.membership.role is ShareRole.OWNER:
+            owner_tools = (
+                "<form class='share-invite' data-share='" + html.escape(share.id) + "'>"
+                "<select name='role'><option value='viewer'>Viewer</option>"
+                "<option value='editor'>Editor</option></select>"
+                "<button type='submit'>Create member invitation</button></form>"
+                "<div class='invite-result' hidden><strong>One-time token</strong>"
+                "<code></code><button class='copy-token'>Copy</button></div>"
+            )
+        cards.append(
+            "<article class='share-card'><header><div><h2>" + html.escape(share.name) +
+            "</h2><p>" + html.escape(share.state.value.title()) + " · " +
+            html.escape(detail.membership.role.value.title()) + "</p></div>"
+            "<span class='badge'>" + str(len(detail.members)) + " member" +
+            ("s" if len(detail.members) != 1 else "") + "</span></header>"
+            "<ul>" + members + "</ul>" + owner_tools + "</article>"
+        )
+    content = "".join(cards) or (
+        "<section class='empty'><h2>No shared decks yet</h2>"
+        "<p>Create one to invite viewers or editors.</p></section>"
+    )
+    cookie = json.dumps(csrf_cookie_name)
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
+        "<title>Shared decks · ankiweb</title>"
+        "<link rel='stylesheet' href='/shell/static/mobile.css'><style>"
+        ".shares-page{width:min(100% - 28px,820px);margin:24px auto 80px}"
+        ".shares-head{display:flex;gap:16px;justify-content:space-between;align-items:center}"
+        ".shares-head h1{margin:0;font-size:1.5rem}.shares-head p,.share-card p,.empty p{color:var(--muted)}"
+        ".shares-head a{text-decoration:none}.create-share,.share-card,.empty{background:var(--surface);"
+        "border:1px solid var(--border);border-radius:16px;padding:18px;margin:14px 0}"
+        ".create-share{display:grid;grid-template-columns:1fr auto;gap:10px}.create-share h2{grid-column:1/-1}"
+        "input,select{min-height:44px;border:1px solid var(--border);border-radius:9px;"
+        "background:var(--surface);color:var(--text);padding:9px 11px}.share-card header,.share-card li{"
+        "display:flex;align-items:center;justify-content:space-between;gap:12px}.share-card h2{margin:0}"
+        ".share-card p{margin:4px 0}.share-card ul{list-style:none;padding:0;margin:14px 0}"
+        ".share-card li{padding:10px 0;border-bottom:1px solid var(--border)}"
+        ".share-card li small{margin-left:auto;color:var(--muted)}.badge{padding:5px 9px;"
+        "border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:.8rem}"
+        ".share-invite{display:flex;gap:8px}.invite-result{padding:12px;margin-top:10px;"
+        "background:var(--surface-soft);border-radius:9px}.invite-result code{display:block;"
+        "overflow-wrap:anywhere;margin:8px 0}.remove-member{color:var(--danger)}"
+        "@media(max-width:600px){.create-share{grid-template-columns:1fr}.share-invite{flex-direction:column}}"
+        "</style></head><body><main class='shares-page'><header class='shares-head'><div>"
+        "<h1>Shared decks</h1><p>Membership and collaboration access.</p></div>"
+        "<a href='/account'>Account</a></header><form class='create-share' id='create-share'>"
+        "<h2>Create a shared deck</h2><input name='name' maxlength='128' required "
+        "placeholder='Shared deck name'><button type='submit'>Create</button></form>" + content +
+        "</main><script>" + f"const csrfName={cookie};" +
+        "const csrf=()=>decodeURIComponent((document.cookie.split('; ').find(x=>"
+        "x.startsWith(csrfName+'='))||'=').split('=').slice(1).join('='));"
+        "const headers=()=>({'content-type':'application/json','x-csrf-token':csrf()});"
+        "document.getElementById('create-share').onsubmit=async e=>{e.preventDefault();"
+        "const name=new FormData(e.currentTarget).get('name');const r=await fetch('/api/v1/shares',"
+        "{method:'POST',headers:headers(),body:JSON.stringify({name})});if(r.ok)location.reload();else alert('Create failed')};"
+        "document.querySelectorAll('.share-invite').forEach(form=>form.onsubmit=async e=>{"
+        "e.preventDefault();const role=new FormData(form).get('role');const r=await fetch('/api/v1/shares/'"
+        "+form.dataset.share+'/invitations',{method:'POST',headers:headers(),body:JSON.stringify({role})});"
+        "if(!r.ok){alert('Invitation failed');return}const v=await r.json();const box=form.nextElementSibling;"
+        "box.hidden=false;box.querySelector('code').textContent=v.token;box.querySelector('.copy-token').onclick=()"
+        "=>navigator.clipboard.writeText(v.token)});document.querySelectorAll('.remove-member').forEach(button=>"
+        "button.onclick=async()=>{if(!confirm('Remove this member?'))return;const r=await fetch('/api/v1/shares/'"
+        "+button.dataset.share+'/members/'+button.dataset.user,{method:'DELETE',headers:headers()});"
+        "if(r.ok)location.reload();else alert('Remove failed')});</script></body></html>"
+    )
+
+
 def create_multi_user_app(settings: Settings) -> FastAPI:
     if not settings.multi_user:
         raise ValueError("multi-user settings required")
@@ -165,6 +252,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         provision=storage.provision_empty_user,
         rollback_provision=storage.discard_provisioned_user,
     )
+    sharing = SharingService(SharingRepository(identity.repository.database))
     registry: RuntimeRegistry[TenantCollectionRuntime] = RuntimeRegistry(
         lambda key: TenantCollectionRuntime(key, storage=storage, base_settings=settings),
         max_active=settings.max_active_runtimes,
@@ -237,10 +325,12 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
     }
 
     def is_control_path(path: str) -> bool:
-        return path == "/account" or path.startswith((
+        return path in {"/account", "/shares", "/shares/invite"} or path.startswith((
             f"{API_PREFIX}/auth/",
             f"{API_PREFIX}/admin/",
             f"{API_PREFIX}/account-invites/",
+            f"{API_PREFIX}/shares",
+            f"{API_PREFIX}/share-invitations/",
             f"{API_PREFIX}/health/",
         ))
 
@@ -390,7 +480,28 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
             user, sessions, csrf_cookie_name=identity_http.csrf_cookie_name,
         ))
 
+    @app.get("/shares", response_class=HTMLResponse)
+    async def shares_page(request: Request):
+        principal = await identity_http.optional_principal(request)
+        if principal is None:
+            return RedirectResponse("/login", status_code=303)
+        shares = await asyncio.to_thread(sharing.list_shares, principal.user.id)
+        details = [await asyncio.to_thread(
+            sharing.get_share, actor_user_id=principal.user.id, share_id=share.id,
+        ) for share in shares]
+        user_ids = {member.user_id for detail in details for member in detail.members}
+        users = await asyncio.gather(*(
+            asyncio.to_thread(identity.repository.get_user, user_id) for user_id in user_ids
+        ))
+        names = {
+            user.id: (user.display_name or user.username) for user in users if user is not None
+        }
+        return HTMLResponse(_shares_html(
+            details, names, csrf_cookie_name=identity_http.csrf_cookie_name,
+        ))
+
     app.include_router(identity_http.router)
+    app.include_router(build_sharing_router(sharing, identity_http))
     app.include_router(build_api_router(
         get_service,
         SessionStore(),

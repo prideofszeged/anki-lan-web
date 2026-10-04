@@ -142,10 +142,49 @@ def _migration_3(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_4(conn: sqlite3.Connection) -> None:
+    for statement in (
+        """CREATE TABLE deck_shares (
+            id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            name TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('draft','active','archived')),
+            current_release INTEGER,
+            created_at INTEGER NOT NULL
+        )""",
+        """CREATE TABLE share_members (
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')),
+            state TEXT NOT NULL CHECK(state IN ('active','removed')),
+            joined_at INTEGER NOT NULL,
+            removed_at INTEGER,
+            PRIMARY KEY(share_id,user_id)
+        )""",
+        """CREATE TABLE share_invites (
+            id TEXT PRIMARY KEY,
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE CASCADE,
+            token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash)=32),
+            role TEXT NOT NULL CHECK(role IN ('editor','viewer')),
+            created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            intended_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            consumed_at INTEGER,
+            consumed_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+            revoked_at INTEGER
+        )""",
+        "CREATE INDEX share_members_user ON share_members(user_id,state,share_id)",
+        "CREATE INDEX share_invites_expiry ON share_invites(expires_at)",
+    ):
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, "identity control tables", _migration_1),
     (2, "identity lookup indexes", _migration_2),
     (3, "durable job journals", _migration_3),
+    (4, "share membership and invitations", _migration_4),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
