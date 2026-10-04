@@ -230,6 +230,49 @@ def _migration_6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_7(conn: sqlite3.Connection) -> None:
+    for statement in (
+        """CREATE TABLE update_conflicts (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            subscription_id TEXT NOT NULL REFERENCES share_subscriptions(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            field_name TEXT,
+            base_hash TEXT NOT NULL CHECK(length(base_hash)=64),
+            local_hash TEXT NOT NULL CHECK(length(local_hash)=64),
+            upstream_hash TEXT NOT NULL CHECK(length(upstream_hash)=64),
+            resolution TEXT CHECK(resolution IN ('mine','upstream','manual')),
+            resolved_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+            resolved_at INTEGER,
+            UNIQUE(job_id,entity_type,source_id,field_name)
+        )""",
+        """CREATE TABLE workspace_revisions (
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 0),
+            changed_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            changed_at INTEGER NOT NULL,
+            PRIMARY KEY(share_id,entity_type,entity_id)
+        )""",
+        """CREATE TABLE workspace_comments (
+            id TEXT PRIMARY KEY,
+            share_id TEXT NOT NULL REFERENCES deck_shares(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            author_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            body TEXT NOT NULL,
+            resolved_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""",
+        "CREATE INDEX update_conflicts_subscription ON update_conflicts(subscription_id,job_id)",
+        "CREATE INDEX workspace_comments_entity ON workspace_comments(share_id,entity_type,entity_id)",
+    ):
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, "identity control tables", _migration_1),
     (2, "identity lookup indexes", _migration_2),
@@ -237,6 +280,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (4, "share membership and invitations", _migration_4),
     (5, "immutable releases and subscriptions", _migration_5),
     (6, "bind immutable release manifests", _migration_6),
+    (7, "sharing updates and collaboration", _migration_7),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

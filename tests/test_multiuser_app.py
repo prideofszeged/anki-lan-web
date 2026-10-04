@@ -103,6 +103,32 @@ def test_multiuser_app_requires_multiuser_settings(tmp_path) -> None:
         raise AssertionError("single-user settings were accepted")
 
 
+def test_collaboration_mutation_routes_remain_fail_closed_until_runtime_exclusion(tmp_path):
+    settings = _settings(tmp_path)
+    identity, _ = _identity(settings)
+    identity.bootstrap_owner(username="alice", password="safe-password")
+    with TestClient(create_multi_user_app(settings)) as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "safe-password"},
+        )
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+        # These handlers manipulate collection roots and intentionally stay unmounted
+        # until RuntimeRegistry provides an exclusive resource-maintenance lease.
+        assert client.patch(
+            "/api/v1/shares/00000000-0000-0000-0000-000000000001/workspace/notes/guid",
+            headers={"x-csrf-token": csrf, "origin": "http://testserver"},
+            json={"expected_revision": 0, "fields": {"Front": "unsafe"}},
+        ).status_code in {404, 405}
+        assert client.post(
+            "/api/v1/subscriptions/00000000-0000-0000-0000-000000000002/updates",
+            headers={
+                "x-csrf-token": csrf, "idempotency-key": "blocked",
+                "origin": "http://testserver",
+            },
+            json={"target_version": 2},
+        ).status_code in {404, 405}
 def test_multiuser_app_refuses_to_start_without_an_owner(tmp_path) -> None:
     settings = _settings(tmp_path)
     app = create_multi_user_app(settings)

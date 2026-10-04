@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from ankiweb.identity.repository import (
 from .models import (
     DeckShare, MembershipState, ShareDetail, ShareInvite, ShareMembership,
     ShareRelease, ShareRole, ShareState, ShareSubscription, SubscriptionEntity,
+    UpdateConflict, WorkspaceComment, WorkspaceRevision,
 )
 
 
@@ -82,6 +84,47 @@ def _entity(row: sqlite3.Row) -> SubscriptionEntity:
         base_hash=row["base_hash"], media_name=row["media_name"],
         updated_at=_datetime(row["updated_at"]),
     )
+
+
+def _conflict(row: sqlite3.Row) -> UpdateConflict:
+    return UpdateConflict(
+        id=row["id"], job_id=row["job_id"], subscription_id=row["subscription_id"],
+        entity_type=row["entity_type"], source_id=row["source_id"],
+        field_name=row["field_name"], base_hash=row["base_hash"],
+        local_hash=row["local_hash"], upstream_hash=row["upstream_hash"],
+        resolution=row["resolution"], resolved_by=row["resolved_by"],
+        resolved_at=_datetime(row["resolved_at"]),
+    )
+
+
+def _revision(row: sqlite3.Row) -> WorkspaceRevision:
+    return WorkspaceRevision(
+        share_id=row["share_id"], entity_type=row["entity_type"],
+        entity_id=row["entity_id"], revision=row["revision"],
+        changed_by=row["changed_by"], changed_at=_datetime(row["changed_at"]),
+    )
+
+
+def _comment(row: sqlite3.Row) -> WorkspaceComment:
+    return WorkspaceComment(
+        id=row["id"], share_id=row["share_id"], entity_type=row["entity_type"],
+        entity_id=row["entity_id"], author_user_id=row["author_user_id"],
+        body=row["body"], resolved_at=_datetime(row["resolved_at"]),
+        created_at=_datetime(row["created_at"]), updated_at=_datetime(row["updated_at"]),
+    )
+
+
+def _comment_body(body: str) -> str:
+    cleaned = body.strip()
+    if not cleaned or len(cleaned) > 10_000 or "<" in cleaned or ">" in cleaned:
+        raise ValueError("comment must be plain Markdown of 1 to 10000 characters")
+    links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", cleaned)
+    if any(
+        not (target.startswith("#") or target.startswith("/") and not target.startswith("//"))
+        for target in links
+    ) or "://" in cleaned:
+        raise ValueError("comment links must be local")
+    return cleaned
 
 
 class SharingRepository:
@@ -172,6 +215,13 @@ class SharingRepository:
     def require_member(self, *, actor_user_id: str, share_id: str) -> ShareMembership:
         with self.database.read() as conn:
             return _membership(self._require_member(conn, share_id, actor_user_id))
+
+    def require_editor(self, *, actor_user_id: str, share_id: str) -> ShareMembership:
+        with self.database.read() as conn:
+            row = self._require_member(conn, share_id, actor_user_id)
+            if row["role"] not in (ShareRole.OWNER.value, ShareRole.EDITOR.value):
+                raise AuthorizationError("share editor permission required")
+            return _membership(row)
 
     def list_shares(self, actor_user_id: str) -> list[DeckShare]:
         with self.database.read() as conn:
@@ -445,3 +495,319 @@ class SharingRepository:
                 (subscription_id,),
             ).fetchall()
             return [_entity(row) for row in rows]
+
+    def get_subscription(
+        self, *, actor_user_id: str, subscription_id: str,
+    ) -> ShareSubscription:
+        with self.database.read() as conn:
+            row = conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=? AND user_id=?",
+                (subscription_id, actor_user_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("subscription not found")
+            self._require_member(conn, row["share_id"], actor_user_id)
+            return _subscription(row)
+
+    def set_subscription_policy(
+        self, *, actor_user_id: str, subscription_id: str, policy: str, now: datetime,
+    ) -> ShareSubscription:
+        if policy not in {"retire", "mirror"}:
+            raise ValueError("subscription policy must be retire or mirror")
+        with self.database.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=? AND user_id=?",
+                (subscription_id, actor_user_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("subscription not found")
+            self._require_member(conn, row["share_id"], actor_user_id)
+            conn.execute(
+                "UPDATE share_subscriptions SET conflict_policy=? WHERE id=?",
+                (policy, subscription_id),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.subscription.policy",
+                share_id=row["share_id"], metadata={"policy": policy},
+            )
+            return _subscription(conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=?", (subscription_id,),
+            ).fetchone())
+
+    def store_update_conflicts(
+        self, *, actor_user_id: str, job_id: str, subscription_id: str,
+        conflicts: list[dict], now: datetime,
+    ) -> list[UpdateConflict]:
+        with self.database.transaction() as conn:
+            subscription = conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=? AND user_id=?",
+                (subscription_id, actor_user_id),
+            ).fetchone()
+            job = conn.execute(
+                "SELECT * FROM jobs WHERE id=? AND actor_user_id=?",
+                (job_id, actor_user_id),
+            ).fetchone()
+            if subscription is None or job is None:
+                raise NotFoundError("update job not found")
+            self._require_member(conn, subscription["share_id"], actor_user_id)
+            for item in conflicts:
+                existing = conn.execute(
+                    """SELECT id FROM update_conflicts WHERE job_id=? AND entity_type=?
+                       AND source_id=? AND field_name=?""",
+                    (job_id, item["entity_type"], item["source_id"], item["field_name"]),
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """INSERT INTO update_conflicts(
+                           id,job_id,subscription_id,entity_type,source_id,field_name,
+                           base_hash,local_hash,upstream_hash)
+                           VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (str(uuid.uuid4()), job_id, subscription_id, item["entity_type"],
+                         item["source_id"], item["field_name"], item["base_hash"],
+                         item["local_hash"], item["upstream_hash"]),
+                    )
+            rows = conn.execute(
+                "SELECT * FROM update_conflicts WHERE job_id=? ORDER BY entity_type,source_id,field_name",
+                (job_id,),
+            ).fetchall()
+            return [_conflict(row) for row in rows]
+
+    def list_job_conflicts(
+        self, *, actor_user_id: str, job_id: str,
+    ) -> list[UpdateConflict]:
+        with self.database.read() as conn:
+            job = conn.execute(
+                "SELECT * FROM jobs WHERE id=? AND actor_user_id=?", (job_id, actor_user_id),
+            ).fetchone()
+            if job is None:
+                raise NotFoundError("update job not found")
+            subscription = conn.execute(
+                "SELECT share_id FROM share_subscriptions WHERE id=? AND user_id=?",
+                (job["resource_id"], actor_user_id),
+            ).fetchone()
+            if subscription is None:
+                raise NotFoundError("update job not found")
+            self._require_member(conn, subscription["share_id"], actor_user_id)
+            return [_conflict(row) for row in conn.execute(
+                "SELECT * FROM update_conflicts WHERE job_id=? ORDER BY entity_type,source_id,field_name",
+                (job_id,),
+            )]
+
+    def resolve_conflict(
+        self, *, actor_user_id: str, job_id: str, conflict_id: str,
+        resolution: str, now: datetime,
+    ) -> UpdateConflict:
+        if resolution not in {"mine", "upstream", "manual"}:
+            raise ValueError("invalid conflict resolution")
+        with self.database.transaction() as conn:
+            row = conn.execute(
+                """SELECT c.*,s.share_id,s.user_id FROM update_conflicts c
+                   JOIN share_subscriptions s ON s.id=c.subscription_id
+                   JOIN jobs j ON j.id=c.job_id
+                   WHERE c.id=? AND c.job_id=? AND j.actor_user_id=?""",
+                (conflict_id, job_id, actor_user_id),
+            ).fetchone()
+            if row is None or row["user_id"] != actor_user_id:
+                raise NotFoundError("update conflict not found")
+            self._require_member(conn, row["share_id"], actor_user_id)
+            if row["entity_type"] == "media" and resolution == "manual":
+                raise ValueError("binary media conflicts allow only mine or upstream")
+            conn.execute(
+                """UPDATE update_conflicts SET resolution=?,resolved_by=?,resolved_at=?
+                   WHERE id=?""",
+                (resolution, actor_user_id, _epoch(now), conflict_id),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.conflict.resolved",
+                share_id=row["share_id"], metadata={
+                    "conflict_id": conflict_id, "resolution": resolution,
+                    "base_hash": row["base_hash"], "local_hash": row["local_hash"],
+                    "upstream_hash": row["upstream_hash"],
+                },
+            )
+            return _conflict(conn.execute(
+                "SELECT * FROM update_conflicts WHERE id=?", (conflict_id,),
+            ).fetchone())
+
+    def commit_subscription_update(
+        self, *, actor_user_id: str, subscription_id: str,
+        expected_version: int, target_version: int, entities: list[dict],
+        now: datetime,
+    ) -> ShareSubscription:
+        with self.database.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=? AND user_id=?",
+                (subscription_id, actor_user_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("subscription not found")
+            self._require_member(conn, row["share_id"], actor_user_id)
+            if row["installed_release"] != expected_version:
+                raise ConflictError("subscription changed concurrently")
+            if not conn.execute(
+                "SELECT 1 FROM share_releases WHERE share_id=? AND version=?",
+                (row["share_id"], target_version),
+            ).fetchone():
+                raise NotFoundError("release not found")
+            conn.execute("DELETE FROM subscription_entities WHERE subscription_id=?", (subscription_id,))
+            for item in entities:
+                conn.execute(
+                    """INSERT INTO subscription_entities(subscription_id,entity_type,source_id,
+                       recipient_id,base_hash,media_name,updated_at) VALUES(?,?,?,?,?,?,?)""",
+                    (subscription_id, item["entity_type"], item["source_id"],
+                     item["recipient_id"], item["base_hash"], item.get("media_name"),
+                     _epoch(now)),
+                )
+            conn.execute(
+                "UPDATE share_subscriptions SET installed_release=? WHERE id=?",
+                (target_version, subscription_id),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.subscription.updated",
+                share_id=row["share_id"], metadata={
+                    "from_version": expected_version, "to_version": target_version,
+                },
+            )
+            return _subscription(conn.execute(
+                "SELECT * FROM share_subscriptions WHERE id=?", (subscription_id,),
+            ).fetchone())
+
+    def get_workspace_revision(
+        self, *, actor_user_id: str, share_id: str, entity_type: str, entity_id: str,
+    ) -> WorkspaceRevision | None:
+        with self.database.read() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            row = conn.execute(
+                """SELECT * FROM workspace_revisions WHERE share_id=?
+                   AND entity_type=? AND entity_id=?""",
+                (share_id, entity_type, entity_id),
+            ).fetchone()
+            return _revision(row) if row else None
+
+    def commit_workspace_revision(
+        self, *, actor_user_id: str, share_id: str, entity_type: str,
+        entity_id: str, expected_revision: int, now: datetime,
+    ) -> WorkspaceRevision:
+        with self.database.transaction() as conn:
+            member = self._require_member(conn, share_id, actor_user_id)
+            if member["role"] not in (ShareRole.OWNER.value, ShareRole.EDITOR.value):
+                raise AuthorizationError("share editor permission required")
+            row = conn.execute(
+                """SELECT * FROM workspace_revisions WHERE share_id=?
+                   AND entity_type=? AND entity_id=?""",
+                (share_id, entity_type, entity_id),
+            ).fetchone()
+            current = int(row["revision"]) if row else 0
+            if current != expected_revision:
+                raise ConflictError("workspace entity revision changed")
+            revision = current + 1
+            conn.execute(
+                """INSERT INTO workspace_revisions(
+                   share_id,entity_type,entity_id,revision,changed_by,changed_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(share_id,entity_type,entity_id) DO UPDATE SET
+                   revision=excluded.revision,changed_by=excluded.changed_by,
+                   changed_at=excluded.changed_at""",
+                (share_id, entity_type, entity_id, revision, actor_user_id, _epoch(now)),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.workspace.changed",
+                share_id=share_id, metadata={
+                    "entity_type": entity_type, "entity_id": entity_id,
+                    "revision": revision,
+                },
+            )
+            return _revision(conn.execute(
+                """SELECT * FROM workspace_revisions WHERE share_id=?
+                   AND entity_type=? AND entity_id=?""",
+                (share_id, entity_type, entity_id),
+            ).fetchone())
+
+    def add_workspace_comment(
+        self, *, actor_user_id: str, share_id: str, entity_type: str,
+        entity_id: str, body: str, now: datetime,
+    ) -> WorkspaceComment:
+        cleaned = _comment_body(body)
+        if entity_type not in {"note", "template", "deck"}:
+            raise ValueError("invalid comment entity type")
+        with self.database.transaction() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            comment_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO workspace_comments(
+                   id,share_id,entity_type,entity_id,author_user_id,body,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (comment_id, share_id, entity_type, entity_id, actor_user_id,
+                 cleaned, _epoch(now), _epoch(now)),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.comment.created",
+                share_id=share_id, metadata={
+                    "comment_id": comment_id, "entity_type": entity_type,
+                    "entity_id": entity_id,
+                },
+            )
+            return _comment(conn.execute(
+                "SELECT * FROM workspace_comments WHERE id=?", (comment_id,),
+            ).fetchone())
+
+    def list_workspace_comments(
+        self, *, actor_user_id: str, share_id: str,
+        entity_type: str, entity_id: str,
+    ) -> list[WorkspaceComment]:
+        with self.database.read() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            return [_comment(row) for row in conn.execute(
+                """SELECT * FROM workspace_comments WHERE share_id=?
+                   AND entity_type=? AND entity_id=? ORDER BY created_at,id""",
+                (share_id, entity_type, entity_id),
+            )]
+
+    def edit_workspace_comment(
+        self, *, actor_user_id: str, share_id: str, comment_id: str,
+        body: str, now: datetime,
+    ) -> WorkspaceComment:
+        cleaned = _comment_body(body)
+        with self.database.transaction() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            row = conn.execute(
+                "SELECT * FROM workspace_comments WHERE id=? AND share_id=?",
+                (comment_id, share_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("comment not found")
+            if row["author_user_id"] != actor_user_id:
+                raise AuthorizationError("only the comment author may edit")
+            if _epoch(now) > row["created_at"] + 15 * 60:
+                raise ConflictError("comment edit window has closed")
+            conn.execute(
+                "UPDATE workspace_comments SET body=?,updated_at=? WHERE id=?",
+                (cleaned, _epoch(now), comment_id),
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.comment.edited",
+                share_id=share_id, metadata={"comment_id": comment_id},
+            )
+            return _comment(conn.execute(
+                "SELECT * FROM workspace_comments WHERE id=?", (comment_id,),
+            ).fetchone())
+
+    def resolve_workspace_comment(
+        self, *, actor_user_id: str, share_id: str, comment_id: str, now: datetime,
+    ) -> WorkspaceComment:
+        with self.database.transaction() as conn:
+            self._require_member(conn, share_id, actor_user_id)
+            changed = conn.execute(
+                """UPDATE workspace_comments SET resolved_at=?,updated_at=?
+                   WHERE id=? AND share_id=? AND resolved_at IS NULL""",
+                (_epoch(now), _epoch(now), comment_id, share_id),
+            ).rowcount
+            if changed != 1:
+                raise NotFoundError("active comment not found")
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.comment.resolved",
+                share_id=share_id, metadata={"comment_id": comment_id},
+            )
+            return _comment(conn.execute(
+                "SELECT * FROM workspace_comments WHERE id=?", (comment_id,),
+            ).fetchone())

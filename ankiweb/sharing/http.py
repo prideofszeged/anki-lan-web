@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
+from fastapi import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from ankiweb.adapters.anki.collaboration import (
+    DestructiveTemplateChangeError, EditConflictError, MirrorPreviewRequired,
+    UnresolvedUpdateError,
+)
+from ankiweb.config import host_allowed
 from ankiweb.identity.http import IdentityHttp, IdentityPrincipal
 from ankiweb.identity.repository import (
     AuthorizationError, ConflictError, ExpiredTokenError, InvalidTokenError,
     NotFoundError,
 )
+from ankiweb.security import origin_ok
 
+from .events import ShareSocketRegistry
 from .models import DeckShare, ShareDetail, ShareMembership, ShareRole, ShareState
 from .repository import ShareNotFoundError
 from .service import SharingService
@@ -91,6 +100,32 @@ class ShareInviteAcceptRequest(BaseModel):
     token: SecretStr = Field(min_length=32, max_length=512)
 
 
+class WorkspaceNotePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0)
+    fields: dict[str, str] = Field(min_length=1)
+
+
+class WorkspaceCommentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entity_type: Literal["note", "template", "deck"]
+    entity_id: str = Field(min_length=1, max_length=256)
+    body: str = Field(min_length=1, max_length=10_000)
+
+
+class SubscriptionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_version: int = Field(ge=1)
+    mirror_preview_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    approve_templates: bool = False
+
+
+class ConflictResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolution: Literal["mine", "upstream", "manual"]
+    manual_value: str | None = Field(default=None, max_length=1_000_000)
+
+
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ShareNotFoundError):
         return HTTPException(404, {"code": "share_not_found", "message": "share not found"})
@@ -119,8 +154,11 @@ async def _call(function, /, *args, **kwargs):
 
 def build_sharing_router(
     service: SharingService, identity_http: IdentityHttp, *, prefix: str = "/api/v1",
+    workspace: Any | None = None, updater: Any | None = None,
+    connections: ShareSocketRegistry | None = None, allowed_hosts: tuple[str, ...] = (),
 ) -> APIRouter:
     router = APIRouter(prefix=prefix, tags=["sharing"])
+    sockets = connections or ShareSocketRegistry()
 
     @router.get("/shares", response_model=ShareListResponse)
     async def list_shares(
@@ -206,7 +244,190 @@ def build_sharing_router(
             service.remove_member, actor_user_id=principal.user.id,
             share_id=share_id, target_user_id=user_id,
         )
+        await sockets.revoke(share_id, user_id)
         return Response(status_code=204)
 
-    return router
+    @router.websocket("/shares/{share_id}/events")
+    async def share_events(websocket: WebSocket, share_id: str):
+        host = websocket.headers.get("host", "")
+        token = websocket.cookies.get(identity_http.cookie_name)
+        session = await asyncio.to_thread(
+            identity_http.service.authenticate, token, refresh=False,
+        )
+        if session is None or not host_allowed(host, allowed_hosts) or not origin_ok(
+            "WS", websocket.headers, host, allowed_hosts, has_session=True,
+        ):
+            await websocket.close(code=1008)
+            return
+        try:
+            await asyncio.to_thread(
+                service.repository.require_member,
+                actor_user_id=session.user_id, share_id=share_id,
+            )
+        except AuthorizationError:
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        await sockets.register(share_id, session.user_id, websocket)
+        try:
+            while True:
+                await websocket.receive_text()
+                try:
+                    await asyncio.to_thread(
+                        service.repository.require_member,
+                        actor_user_id=session.user_id, share_id=share_id,
+                    )
+                except AuthorizationError:
+                    await websocket.close(code=1008)
+                    return
+                await websocket.send_json({"type": "heartbeat"})
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            await sockets.unregister(share_id, session.user_id, websocket)
 
+    if workspace is not None:
+        @router.patch("/shares/{share_id}/workspace/notes/{guid}")
+        async def edit_workspace_note(
+            share_id: str, guid: str, body: WorkspaceNotePatch, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            try:
+                note = await asyncio.to_thread(
+                    workspace.edit_note, actor_user_id=principal.user.id,
+                    share_id=share_id, guid=guid, fields=body.fields,
+                    expected_revision=body.expected_revision,
+                )
+            except EditConflictError as exc:
+                raise HTTPException(409, {
+                    "code": "edit_conflict", "message": str(exc),
+                    "latest": {
+                        "guid": exc.latest.guid, "fields": exc.latest.fields,
+                        "tags": exc.latest.tags, "revision": exc.latest.revision,
+                    },
+                }) from exc
+            except (AuthorizationError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            return {
+                "note": {"guid": note.guid, "fields": note.fields, "tags": note.tags},
+                "revision": note.revision,
+            }
+
+        @router.post("/shares/{share_id}/workspace/comments", status_code=201)
+        async def add_workspace_comment(
+            share_id: str, body: WorkspaceCommentRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            comment = await _call(
+                service.repository.add_workspace_comment,
+                actor_user_id=principal.user.id, share_id=share_id,
+                entity_type=body.entity_type, entity_id=body.entity_id,
+                body=body.body, now=service._clock(),
+            )
+            return {
+                "id": comment.id, "share_id": comment.share_id,
+                "entity_type": comment.entity_type, "entity_id": comment.entity_id,
+                "author_user_id": comment.author_user_id, "body": comment.body,
+                "created_at": comment.created_at,
+            }
+
+    if updater is not None:
+        @router.post("/subscriptions/{subscription_id}/updates", status_code=202)
+        async def update_subscription(
+            subscription_id: str, body: SubscriptionUpdateRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            key = request.headers.get("idempotency-key", "")
+            try:
+                result = await asyncio.to_thread(
+                    updater.run, actor_user_id=principal.user.id,
+                    subscription_id=subscription_id, target_version=body.target_version,
+                    idempotency_key=key,
+                    mirror_preview_digest=body.mirror_preview_digest,
+                    approve_templates=body.approve_templates,
+                )
+                return {"job_id": result.job_id, "state": "succeeded"}
+            except UnresolvedUpdateError as exc:
+                return {"job_id": exc.job_id, "state": "conflicts"}
+            except MirrorPreviewRequired as exc:
+                raise HTTPException(409, {
+                    "code": "mirror_preview_required", "message": str(exc),
+                }) from exc
+            except DestructiveTemplateChangeError as exc:
+                raise HTTPException(409, {
+                    "code": "template_approval_required", "message": str(exc),
+                }) from exc
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+
+        @router.get("/subscriptions/{subscription_id}/mirror-preview")
+        async def mirror_preview(
+            subscription_id: str, target_version: int,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            preview = await _call(
+                updater.preview_mirror, actor_user_id=principal.user.id,
+                subscription_id=subscription_id, target_version=target_version,
+            )
+            return {
+                "subscription_id": preview.subscription_id,
+                "target_version": preview.target_version,
+                "tombstones": preview.tombstones, "digest": preview.digest,
+            }
+
+        @router.get("/jobs/{job_id}/conflicts")
+        async def list_conflicts(
+            job_id: str,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            conflicts = await _call(
+                service.repository.list_job_conflicts,
+                actor_user_id=principal.user.id, job_id=job_id,
+            )
+            return {"conflicts": [{
+                "id": item.id, "entity_type": item.entity_type,
+                "source_id": item.source_id, "field": item.field_name,
+                "base_hash": item.base_hash, "local_hash": item.local_hash,
+                "upstream_hash": item.upstream_hash, "resolution": item.resolution,
+            } for item in conflicts]}
+
+        @router.post("/jobs/{job_id}/conflicts/{conflict_id}/resolve")
+        async def resolve_conflict(
+            job_id: str, conflict_id: str, body: ConflictResolutionRequest,
+            request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            if body.resolution == "manual" and body.manual_value is None:
+                raise HTTPException(422, {
+                    "code": "manual_value_required", "message": "manual value required",
+                })
+            conflict = await _call(
+                service.repository.resolve_conflict,
+                actor_user_id=principal.user.id, job_id=job_id,
+                conflict_id=conflict_id, resolution=body.resolution,
+                now=service._clock(),
+            )
+            job = updater.jobs.get(job_id)
+            if job is None:
+                raise HTTPException(404, {"code": "not_found", "message": "job not found"})
+            try:
+                result = await asyncio.to_thread(
+                    updater.run, actor_user_id=principal.user.id,
+                    subscription_id=job.resource_id,
+                    target_version=int(job.progress["target_version"]),
+                    idempotency_key=job.idempotency_key,
+                    mirror_preview_digest=job.progress.get("mirror_preview_digest"),
+                    approve_templates=bool(job.progress.get("approve_templates")),
+                    manual_values={conflict.id: body.manual_value}
+                    if body.resolution == "manual" else {},
+                )
+                state = "succeeded" if result.applied else "running"
+            except UnresolvedUpdateError:
+                state = "conflicts"
+            return {"id": conflict.id, "resolution": conflict.resolution, "state": state}
+
+    return router

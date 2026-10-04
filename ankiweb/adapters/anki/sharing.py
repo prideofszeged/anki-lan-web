@@ -359,11 +359,15 @@ class ReleasePublisher:
             notes: dict[str, dict] = {}
             model_ids: set[int] = set()
             deck_ids: set[int] = set()
+            referenced_media: set[str] = set()
             for note_id in col.find_notes(""):
                 note = col.get_note(note_id)
                 model_ids.add(int(note.mid))
                 fields = {name: _json_hash(value) for name, value in note.items()}
+                for value in note.values():
+                    referenced_media.update(col.media.files_in_str(note.mid, value))
                 notes[note.guid] = {
+                    "model": note.note_type()["name"],
                     "fields": fields,
                     "tags": _json_hash(sorted(note.tags)),
                     "hash": _json_hash({"fields": fields, "tags": sorted(note.tags)}),
@@ -386,9 +390,12 @@ class ReleasePublisher:
                 })}
         finally:
             col.close()
+        available_media = {
+            file.relative_to(paths.media).as_posix(): file for file in _safe_files(paths.media)
+        }
         media = {
-            file.relative_to(paths.media).as_posix(): _sha256(file)
-            for file in _safe_files(paths.media)
+            name: _sha256(available_media[name])
+            for name in sorted(referenced_media) if name in available_media
         }
         tombstones: list[str] = []
         if parent_version:
@@ -568,6 +575,19 @@ class ReleaseInstaller:
                 entities.append({
                     "entity_type": "note", "source_id": guid,
                     "recipient_id": str(note_id), "base_hash": value["hash"],
+                })
+                for field_name, field_hash in value["fields"].items():
+                    entities.append({
+                        "entity_type": "note_field",
+                        "source_id": json.dumps(
+                            [guid, field_name], ensure_ascii=False, separators=(",", ":"),
+                        ),
+                        "recipient_id": f"{note_id}:{field_name}",
+                        "base_hash": field_hash,
+                    })
+                entities.append({
+                    "entity_type": "note_tags", "source_id": guid,
+                    "recipient_id": str(note_id), "base_hash": value["tags"],
                 })
             target_deck = None
             for name, value in manifest["entities"]["decks"].items():

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from ankiweb.identity import IdentityDatabase, IdentityRepository, IdentityService
 from ankiweb.identity.http import CSRF_HEADER, build_identity_http
@@ -119,3 +121,38 @@ def test_invite_token_never_appears_in_path_and_replay_is_idempotent(tmp_path):
     assert first.status_code == replay.status_code == 200
     assert first.json() == replay.json()
 
+
+def test_sh10_member_removal_closes_workspace_socket_and_denies_reconnect(tmp_path):
+    app = _app(tmp_path)
+    owner, owner_csrf = _login(app, "owner")
+    share = owner.post(
+        "/api/v1/shares", headers={CSRF_HEADER: owner_csrf}, json={"name": "Greek A1"},
+    ).json()
+    invite = owner.post(
+        f"/api/v1/shares/{share['id']}/invitations",
+        headers={CSRF_HEADER: owner_csrf},
+        json={"role": "viewer"},
+    ).json()
+    viewer, viewer_csrf = _login(app, "viewer")
+    membership = viewer.post(
+        "/api/v1/share-invitations/accept",
+        headers={CSRF_HEADER: viewer_csrf}, json={"token": invite["token"]},
+    ).json()
+    endpoint = f"/api/v1/shares/{share['id']}/events"
+    with viewer.websocket_connect(
+        endpoint, headers={"origin": "http://testserver"},
+    ) as websocket:
+        removed = owner.delete(
+            f"/api/v1/shares/{share['id']}/members/{membership['user_id']}",
+            headers={CSRF_HEADER: owner_csrf},
+        )
+        assert removed.status_code == 204
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_json()
+        assert closed.value.code == 1008
+    with pytest.raises(WebSocketDisconnect) as denied:
+        with viewer.websocket_connect(
+            endpoint, headers={"origin": "http://testserver"},
+        ):
+            pass
+    assert denied.value.code == 1008

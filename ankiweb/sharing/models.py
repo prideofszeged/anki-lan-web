@@ -103,3 +103,42 @@ class SubscriptionEntity:
     base_hash: str
     media_name: str | None
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateConflict:
+    id: str
+    job_id: str
+    subscription_id: str
+    entity_type: str
+    source_id: str
+    field_name: str | None
+    base_hash: str
+    local_hash: str
+    upstream_hash: str
+    resolution: str | None
+    resolved_by: str | None
+    resolved_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRevision:
+    share_id: str
+    entity_type: str
+    entity_id: str
+    revision: int
+    changed_by: str
+    changed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceComment:
+    id: str
+    share_id: str
+    entity_type: str
+    entity_id: str
+    author_user_id: str
+    body: str
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

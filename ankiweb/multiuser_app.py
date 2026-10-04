@@ -18,6 +18,7 @@ from ankiweb.assets import (
     build_sveltekit_router,
 )
 from ankiweb.auth import LoginLimiter, SessionStore, login_client
+from ankiweb.adapters.anki.collaboration import SubscriptionUpdater
 from ankiweb.config import Settings, host_allowed
 from ankiweb.identity import IdentityDatabase, IdentityRepository, IdentityService
 from ankiweb.identity.http import (
@@ -29,6 +30,7 @@ from ankiweb.screens.routes import build_screen_router
 from ankiweb.security import origin_ok, security_headers
 from ankiweb.sharing import ShareRole, SharingRepository, SharingService
 from ankiweb.sharing.http import build_sharing_router
+from ankiweb.sharing.events import ShareSocketRegistry
 from ankiweb.tenancy import (
     ResourceKey,
     RuntimeCapacityError,
@@ -253,6 +255,8 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         rollback_provision=storage.discard_provisioned_user,
     )
     sharing = SharingService(SharingRepository(identity.repository.database))
+    update_recovery = SubscriptionUpdater(storage, sharing.repository)
+    share_sockets = ShareSocketRegistry()
     registry: RuntimeRegistry[TenantCollectionRuntime] = RuntimeRegistry(
         lambda key: TenantCollectionRuntime(key, storage=storage, base_settings=settings),
         max_active=settings.max_active_runtimes,
@@ -297,6 +301,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         nonlocal ready
         storage.prepare()
         await asyncio.to_thread(identity.initialize)
+        await asyncio.to_thread(update_recovery.recover_all)
         if not await asyncio.to_thread(identity.repository.has_active_owner):
             raise RuntimeError(
                 "multi-user identity is not bootstrapped; run `python -m ankiweb user bootstrap`"
@@ -501,7 +506,10 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         ))
 
     app.include_router(identity_http.router)
-    app.include_router(build_sharing_router(sharing, identity_http))
+    app.include_router(build_sharing_router(
+        sharing, identity_http, connections=share_sockets,
+        allowed_hosts=settings.allowed_hosts,
+    ))
     app.include_router(build_api_router(
         get_service,
         SessionStore(),
