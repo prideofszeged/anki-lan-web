@@ -474,6 +474,8 @@ Non-goals:
 - ⊥ automatic destructive overwrite of subscriber local edits
 - ⊥ admin impersonation
 - ⊥ native Anki sync protocol in T16–T19
+- multi-user mode disables AnkiConnect; future API-key digest binds exactly one user; share workspace access ⊥
+- locale server-global in MVP-A/B; per-user locale waits for Anki process-global locale removal
 
 ### 11.2 identity + provisioning
 
@@ -517,8 +519,15 @@ user_quotas(user_id PK, storage_bytes, import_bytes, active_jobs,
             active_sessions, review_sockets)
 audit_events(id, occurred_at, actor_user_id, target_user_id, action,
              resource_type, resource_id, request_id, outcome, metadata_json)
+jobs(id UUID PK, actor_user_id, resource_type, resource_id, capability, state,
+     idempotency_key, generation, progress_json, error_code, created_at,
+     started_at, finished_at, UNIQUE(actor_user_id,idempotency_key))
+job_artifacts(id UUID PK, job_id, kind, path_key, sha256, size_bytes,
+              expires_at, created_at)
+job_journal(job_id, sequence, phase, payload_json, committed_at,
+            PRIMARY KEY(job_id,sequence))
 
-deck_shares(id UUID PK, owner_user_id, workspace_id, name, state,
+deck_shares(id UUID PK, owner_user_id, name, state,
             current_release, created_at)
 share_members(share_id, user_id, role, state, joined_at, UNIQUE(share_id,user_id))
 share_invites(id UUID PK, share_id, token_hash UNIQUE, role, created_by,
@@ -527,9 +536,15 @@ share_releases(id UUID PK, share_id, version, manifest_path, bundle_path,
                bundle_sha256, created_by, created_at, UNIQUE(share_id,version))
 share_subscriptions(id UUID PK, share_id, user_id, mode, installed_release,
                     target_deck_id, conflict_policy, created_at)
-workspace_revisions(workspace_id, entity_type, entity_id, revision,
+subscription_entities(subscription_id, entity_type, source_id, recipient_id,
+                      base_hash, media_name, updated_at,
+                      PRIMARY KEY(subscription_id,entity_type,source_id))
+update_conflicts(id UUID PK, job_id, subscription_id, entity_type, source_id,
+                 field_name, base_hash, local_hash, upstream_hash, resolution,
+                 resolved_by, resolved_at)
+workspace_revisions(share_id, entity_type, entity_id, revision,
                     changed_by, changed_at)
-workspace_comments(id UUID PK, workspace_id, entity_type, entity_id,
+workspace_comments(id UUID PK, share_id, entity_type, entity_id,
                    author_user_id, body, resolved_at, created_at)
 ```
 
@@ -576,7 +591,7 @@ class RuntimeRegistry(Protocol):
     async def drain(self) -> None: ...
 ```
 
-`RuntimeLease` owns `CollectionRuntime`; ref-counted by HTTP, WS, job.
+`RuntimeLease` owns `CollectionRuntime`; ref-counted by HTTP command, active reviewer flow, job. Idle WS ⊥ pin runtime.
 
 Lifecycle:
 
@@ -586,7 +601,7 @@ Lifecycle:
 4. open collection + process lock if cold
 5. serialized operation
 6. release lease
-7. idle `15 min` + zero lease/job/socket → flush, close, evict
+7. idle `15 min` + zero lease/job/reviewer flow → flush, close, evict
 
 Defaults:
 
@@ -600,7 +615,9 @@ Requirements:
 
 - per-runtime reviewer sessions keyed by authenticated browser session
 - no global current deck/card/reviewer state
-- WS registry partitioned by resource key + session
+- WS registry key = `(ResourceKey, session_id, connection_id, screen)`
+- WS pending callback owned by exact `connection_id`; other socket response rejected
+- ordinary WS acquires runtime per command; active reviewer flow may pin lease
 - app shutdown → stop admission, drain jobs, close ∀ runtimes
 - runtime open failure affects tenant readiness, not unrelated tenants
 - process lock + registry uniqueness defend double open
@@ -619,6 +636,9 @@ Rules:
 - context created after auth; immutable through request
 - repository/service methods require context or `ResourceKey`; ⊥ ambient global user
 - queued job re-authorizes at start; revoked/suspended actor → cancel
+- queued job re-authorizes again before commit; membership loss → rollback
+- durable journal records stage/fsync/swap/DB-commit phases; restart resumes or rolls back
+- same actor + idempotency key + request shape → same job; different shape → `409`
 - result/download checks actor + resource membership
 - audit actor and target separately
 - session revoke → close matching WS ≤ `5 s`
@@ -631,6 +651,7 @@ Rules:
 - idle expiry `30 days`; absolute expiry `90 days`
 - user `auth_epoch` change revokes ∀ sessions without row scan
 - max active sessions default `10`; oldest idle session revoked on new login
+- `GET /api/v1/auth/csrf` rotates raw CSRF token, stores digest, returns raw token once
 - `GET /api/v1/auth/sessions` lists device label, created, last seen, approximate IP
 - user can revoke one/all sessions
 - admin suspend revokes all; admin cannot mint user session
@@ -655,6 +676,8 @@ Policy:
 - import/install → estimate expanded media + collection delta before commit
 - postflight actual usage; overrun → rollback import/install
 - quota-sensitive import/install runs on disposable same-user collection copy; validate → atomic root swap
+- swap journal: stage → validate → fsync files/root → active→quarantine → stage→active → app DB commit → quarantine cleanup
+- crash recovery yields verified active root or untouched prior root; partial active root ⊥
 - storage-growing management ops blocked @ hard limit with `507 quota_exceeded`
 - review answers use reserved space; ⊥ acknowledge answer before durable commit
 - host free space `<5%` → block all growing jobs; health exposes degraded reason
@@ -741,6 +764,8 @@ Workspace:
 - deck hierarchy within workspace supported; external private deck links ⊥
 - note GUID stable across releases
 - workspace runtime uses same serialized worker model
+- workspace identifier = `deck_shares.id`; separate workspace table ⊥
+- generic AnkiConnect/RPC access ⊥; explicit allowlist only
 
 Release:
 
@@ -751,7 +776,11 @@ Release:
   "parent_version": 2,
   "anki_version": "26.09.3",
   "created_at": "ISO-8601",
-  "note_guids_sha256": "...",
+  "entities": {
+    "notes": {"guid": {"fields": {"Field": "sha256"}, "tags": "sha256"}},
+    "templates": {"stable_id": {"name": "...", "hash": "sha256", "ordinal": 0}},
+    "decks": {"stable_id": {"hash": "sha256"}}
+  },
   "media_sha256": {},
   "tombstones": [],
   "bundle_sha256": "..."
@@ -763,6 +792,7 @@ Release:
 - failed validation → no release/version increment
 - semantic version label optional; monotonic integer canonical
 - archived share allows existing release download; blocks edits/publish/invites
+- release manifest provides stable source IDs + per-field base hashes; aggregate-only hash insufficient
 
 ### 11.13 install + subscription
 
@@ -776,22 +806,27 @@ Install/update job:
 1. authorize membership + release
 2. stage bundle under recipient root
 3. checksum + quota validation
-4. snapshot affected recipient deck metadata
-5. import content via recipient runtime
-6. preserve scheduling/review logs
-7. store source GUID/base hashes + installed release
-8. emit summary + conflicts
+4. copy recipient root to same-filesystem disposable stage
+5. resolve source IDs through `subscription_entities`
+6. three-way apply on stage; generic `.apkg` re-import ⊥ follow update
+7. verify surviving card scheduling fields + ∀ review rows unchanged
+8. validate/fsync + journaled atomic root swap
+9. store mappings/base hashes + installed release in recoverable commit
+10. emit summary + conflicts
 
 Update policy:
 
 - upstream new note/media → add
 - upstream changed content + recipient unchanged from base → update
 - recipient field/template changed from base → conflict; ⊥ silent overwrite
+- any unresolved conflict → stop whole update; installed release unchanged
 - upstream tombstone → tag recipient note `ankiweb::retired`; ⊥ delete default
 - optional `mirror` deletion policy requires per-subscription explicit enable + preview
 - deck options/scheduling config local by default; upstream change shown for opt-in apply
 - unsubscribe retains installed deck/content + local history
 - failed update rolls back content transaction and leaves installed release unchanged
+- upstream template removal/reorder ⊥ automatic follow apply; explicit recipient approval required
+- approved destructive template change shows impacted cards; cards/review rows retained or update rejected
 
 Conflict object:
 
@@ -820,7 +855,8 @@ Conflict values visible only to recipient. Resolution audit stores hashes, not f
 Auth/user:
 
 ```text
-api: POST /api/v1/auth/login {username,password} → 204 + durable session
+api: POST /api/v1/auth/login {username,password} → 200 {user,csrfToken} + durable session
+api: GET /api/v1/auth/csrf → 200 {csrfToken} + rotated readable cookie
 api: GET /api/v1/auth/sessions → 200 {sessions[]}
 api: DELETE /api/v1/auth/sessions/{id} → 204
 api: DELETE /api/v1/auth/sessions → 204
@@ -879,7 +915,7 @@ Preconditions: verified current backup + app stopped + free space ≥ current us
 Steps:
 
 1. migrate app DB schema
-2. create `local` owner UUID; hash current plaintext credential if needed; remove plaintext env config
+2. create `local` owner UUID; hash current plaintext credential if needed
 3. create target user root
 4. copy collection/media; fsync; preserve source immutable
 5. run M1–M10 against target
@@ -887,6 +923,8 @@ Steps:
 7. start multi-user build loopback-only
 8. login, review, audio, import/export, backup smoke
 9. retain old root ≥`30 days`
+
+Host operation after step 2: remove `ANKIWEB_PASSWORD` from host `.env`/secret config + restart. Container cannot erase host config; readiness warns while legacy plaintext remains configured.
 
 Rollback before first target write → old build/root. After target write → stop, restore migration backup, old build/root.
 
@@ -910,6 +948,8 @@ MU10 admin cannot fetch user card/note/media content via admin API
 MU11 audit records actor/target/action; secrets/content absent
 MU12 25-account load: 8 active browsers, 4 runtimes, p95 review transition ≤350 ms
 MU13 same user on two devices cannot double-answer one card; stale lease → 409
+MU14 idle WS count may exceed runtime cap; only active commands/reviewer flows consume leases
+MU15 crash injected after each staged-swap phase recovers old or verified new root
 ```
 
 Sharing/collaboration:
@@ -927,6 +967,7 @@ SH9  concurrent stale workspace edit → 409; winning edit preserved
 SH10 removed member loses active WS + future job access ≤5 s
 SH11 share/workspace/release backup restores + checksum passes
 SH12 subscriber cannot access owner private decks outside workspace/release
+SH13 destructive template update requires recipient approval or rejects with no state change
 ```
 
 Security suite: horizontal-IDOR matrix ∀ user/share/admin endpoints; CSRF/origin/host checks; rate limits; path fuzzing.
@@ -1219,7 +1260,7 @@ Status: `x` done, `~` active, `.` todo.
 |T13|.|cutover `18443`; Webtop read-only fallback|acceptance + user signoff|
 |T14|.|retire Webtop runtime; retain recovery bundle|30-day stable window|
 |T15|.|publish extension API v1|capability + compatibility tests|
-|T16|.|concurrent private accounts|MU1–MU13 + migration pilot|
+|T16|~|concurrent private accounts|MU1–MU15 + migration pilot|
 |T17|.|admin + account/share invitations|admin RBAC + invite abuse tests|
 |T18|.|deck release sharing + subscriptions|SH1–SH8|
 |T19|.|collaboration workspaces|SH9–SH12 + pilot|

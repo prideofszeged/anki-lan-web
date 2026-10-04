@@ -173,3 +173,45 @@ def test_from_env_reads_auth_disabled(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("ANKIWEB_COLLECTION", str(tmp_path / "c.anki2"))
     monkeypatch.setenv("ANKIWEB_AUTH_DISABLED", "1")
     assert Settings.from_env().auth_disabled is True
+
+
+def test_multi_user_auth_comes_from_app_db_not_legacy_env(tmp_path: Path):
+    clean = Settings(collection_path=tmp_path / "legacy.anki2", multi_user=True)
+    assert clean.auth_error() is None
+    legacy = Settings(
+        collection_path=tmp_path / "legacy.anki2",
+        multi_user=True,
+        password="must-be-removed",
+    )
+    assert "remove ANKIWEB_PASSWORD" in legacy.auth_error()
+
+
+def test_multi_user_cannot_disable_auth_or_use_insecure_lan_cookie(tmp_path: Path):
+    disabled = Settings(
+        collection_path=tmp_path / "legacy.anki2",
+        multi_user=True,
+        auth_disabled=True,
+    )
+    assert "cannot disable" in disabled.auth_error()
+    insecure_lan = Settings(
+        collection_path=tmp_path / "legacy.anki2",
+        multi_user=True,
+        host="0.0.0.0",
+        secure_cookie=False,
+    )
+    assert "Secure cookies" in insecure_lan.auth_error()
+    loopback_published = Settings(
+        collection_path=tmp_path / "legacy.anki2",
+        multi_user=True,
+        host="0.0.0.0",
+        secure_cookie=False,
+        insecure_cookie_ok=True,
+    )
+    assert loopback_published.auth_error() is None
+    secure_lan = Settings(
+        collection_path=tmp_path / "legacy.anki2",
+        multi_user=True,
+        host="0.0.0.0",
+        secure_cookie=True,
+    )
+    assert secure_lan.auth_error() is None

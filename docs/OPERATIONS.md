@@ -42,6 +42,9 @@ otherwise).
 
 ## Acceptance checks (SPEC M1–M10)
 
+For the opt-in account migration and multi-user pilot procedure, see
+[MULTIUSER.md](MULTIUSER.md).
+
 Record a baseline from a known-good collection, then verify copies against it. Both commands work
 on a private temporary copy and never write the collection you point them at. Run them against a
 stopped app or a backup, not a live WAL database. The baseline holds counts and hashes only (no

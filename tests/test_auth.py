@@ -1,11 +1,12 @@
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 from ankiweb.config import Settings
 from ankiweb.app import create_app
 from ankiweb.auth import COOKIE
-from ankiweb.auth import LoginLimiter, SessionStore, password_ok
+from ankiweb.auth import LoginLimiter, SessionStore, login_client, password_ok
 
 
 def _client(tmp_path: Path, password: str = "") -> TestClient:
@@ -64,7 +65,7 @@ def test_limiter_reserves_each_attempt_before_verification():
     assert limiter.allow("phone")
 
 
-def test_forwarded_clients_have_separate_login_buckets(tmp_path: Path):
+def test_untrusted_forwarded_header_cannot_bypass_login_bucket(tmp_path: Path):
     with _client(tmp_path, "secret") as c:
         for _ in range(8):
             assert c.post("/login", data={"password": "wrong"},
@@ -72,7 +73,22 @@ def test_forwarded_clients_have_separate_login_buckets(tmp_path: Path):
         assert c.post("/login", data={"password": "wrong"},
                       headers={"X-Forwarded-For": "192.168.1.10"}).status_code == 429
         assert c.post("/login", data={"password": "wrong"},
-                      headers={"X-Forwarded-For": "192.168.1.11"}).status_code == 401
+                      headers={"X-Forwarded-For": "192.168.1.11"}).status_code == 429
+
+
+def test_forwarded_client_is_used_only_for_configured_proxy_network():
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/login",
+        "query_string": b"",
+        "headers": [(b"x-forwarded-for", b"192.168.1.10")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("127.0.0.1", 8000),
+    })
+    assert login_client(request) == "127.0.0.1"
+    assert login_client(request, ("127.0.0.0/8",)) == "192.168.1.10"
 
 
 def test_login_correct_unlocks(tmp_path: Path):

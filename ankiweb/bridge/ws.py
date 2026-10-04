@@ -29,7 +29,7 @@ def build_router(get_hub, allowed_hosts=(), cookie_valid=lambda _token: True,
             return
         hub = get_hub()
         await websocket.accept()
-        hub.register(context, websocket)
+        connection_id = hub.register(context, websocket)
         hub.ui_state.current_screen = context
         try:
             while True:
@@ -62,12 +62,12 @@ def build_router(get_hub, allowed_hosts=(), cookie_valid=lambda _token: True,
                 elif mtype == "result":
                     mid = msg.get("id")
                     if mid is not None:
-                        hub.resolve(mid, msg.get("value"))
+                        hub.resolve(mid, msg.get("value"), connection_id)
                 elif mtype == "ready":
                     pass  # domDone handshake; per-screen logic handles buffering
         except (WebSocketDisconnect, RuntimeError):
             pass  # client left, or the socket was already torn down (e.g. failed broadcast send)
         finally:
-            hub.unregister(context, websocket)
+            hub.unregister(context, websocket, connection_id)
 
     return router

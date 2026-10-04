@@ -73,7 +73,7 @@ to be THE cause. If it recurs on the rebuilt image (which has the dump handler, 
 
 ## Later (T15-T20)
 - [ ] T15 extension API v1
-- [ ] T16 concurrent isolated accounts (MU1-MU13)
+- [~] T16 concurrent isolated accounts (MU1-MU15)
 - [ ] T17 administration + account/share invitations
 - [ ] T18 versioned deck sharing + subscriptions
 - [ ] T19 collaboration workspaces (SH1-SH12)

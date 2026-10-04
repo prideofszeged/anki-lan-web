@@ -119,7 +119,7 @@ def create_app(settings: Settings | None = None, service: CollectionService | No
 
     @app.post("/login")
     async def login_submit(request: Request):
-        client = login_client(request)
+        client = login_client(request, settings.trusted_proxy_cidrs)
         if not login_limiter.allow(client):
             return HTMLResponse(_login_html(error=True), status_code=429)
         form = await request.form()

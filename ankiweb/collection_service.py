@@ -36,12 +36,15 @@ class CollectionService:
         self._active_aux = 0
         self._col: Collection | None = None
         self._subscribers: list = []
+        self._closed = False
 
     @property
     def settings(self):
         return self._settings
 
     async def open(self) -> None:
+        if self._closed:
+            raise RuntimeError("collection service is closed")
         path = self._settings.collection_path
         if not path.is_file() and not self._settings.init_collection:
             raise FileNotFoundError(
@@ -82,13 +85,15 @@ class CollectionService:
             self._col = await loop.run_in_executor(self._executor, _reopen)
 
     async def close(self) -> None:
-        if self._col is None:
+        if self._closed:
             return
         col, self._col = self._col, None
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, lambda: col.close())
+        if col is not None:
+            await loop.run_in_executor(self._executor, lambda: col.close())
         await loop.run_in_executor(None, self._executor.shutdown)
         await loop.run_in_executor(None, self._aux_executor.shutdown)
+        self._closed = True
 
     async def run(self, fn: Callable[[Collection], T]) -> T:
         async with self._lock:

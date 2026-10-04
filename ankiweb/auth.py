@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import time
 from collections import defaultdict, deque
@@ -90,15 +91,28 @@ class LoginLimiter:
         self._events.pop(client, None)
 
 
-def login_client(request: Request) -> str:
-    """Use Caddy's client address when proxied; otherwise use the direct peer.
+def login_client(request: Request, trusted_proxy_cidrs: tuple[str, ...] = ()) -> str:
+    """Return a non-spoofable rate-limit key for the request's client.
 
-    The app port is loopback-only in Compose. Caddy replaces X-Forwarded-For for
-    untrusted downstreams, so LAN clients receive independent limiter buckets.
+    Forwarded headers are honored only when the direct peer belongs to an explicitly
+    trusted proxy network. Direct LAN clients cannot mint new limiter buckets by
+    changing ``X-Forwarded-For``.
     """
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        candidate = forwarded.split(",")[-1].strip()
-        if candidate:
-            return candidate
-    return request.client.host if request.client else "unknown"
+    direct = request.client.host if request.client else "unknown"
+    try:
+        peer = ipaddress.ip_address(direct)
+        trusted = any(
+            peer in ipaddress.ip_network(network, strict=False)
+            for network in trusted_proxy_cidrs
+        )
+    except ValueError:
+        trusted = False
+    if trusted:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            candidate = forwarded.split(",")[0].strip()
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                pass
+    return direct

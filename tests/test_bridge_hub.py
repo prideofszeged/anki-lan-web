@@ -58,3 +58,35 @@ async def test_dead_socket_is_dropped_so_it_is_not_retried_forever():
     await hub.broadcast_opchanges({"deck": True}, initiator=None)  # must not raise
     assert dead not in hub._conns["a"]
     assert len(live.sent) == 1
+
+
+async def test_eval_callback_is_owned_by_exact_connection():
+    hub = BridgeHub()
+    first, second = FakeWS(), FakeWS()
+    first_id = hub.register("reviewer", first)
+    second_id = hub.register("reviewer", second)
+    waiting = asyncio.create_task(
+        hub.eval_with_callback("reviewer", "answer()", connection_id=first_id)
+    )
+    await asyncio.sleep(0)
+    message_id = first.sent[-1]["id"]
+    assert not second.sent
+
+    hub.resolve(message_id, "spoofed", second_id)
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    hub.resolve(message_id, "accepted", first_id)
+    assert await waiting == "accepted"
+
+
+async def test_disconnect_cancels_only_its_pending_callback():
+    hub = BridgeHub()
+    ws = FakeWS()
+    connection_id = hub.register("reviewer", ws)
+    waiting = asyncio.create_task(
+        hub.eval_with_callback("reviewer", "answer()", connection_id=connection_id)
+    )
+    await asyncio.sleep(0)
+    hub.unregister("reviewer", ws, connection_id)
+    with pytest.raises(asyncio.CancelledError):
+        await waiting

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import json
 from typing import Sequence
 
@@ -45,6 +46,22 @@ _TOOLBAR_CSS = (
 )
 
 
+def _identity_account_link() -> str:
+    try:
+        from ankiweb.tenancy.request import current_request_runtime
+
+        user = current_request_runtime().principal.user
+    except RuntimeError:
+        return ""
+    username = html.escape(user.username)
+    initial = html.escape((user.display_name or user.username or "A")[0].upper())
+    return (
+        f"<a class='account-link' href='/account' title='Account: {username}'>"
+        f"<span class='account-avatar' aria-hidden='true'>{initial}</span>"
+        f"<span class='account-name'>{username}</span></a>"
+    )
+
+
 def _toolbar_html() -> str:
     """Built per request so the labels reflect the active language (a module-level
     constant would freeze to the import-time locale). "Source" + the title= tooltips
@@ -62,6 +79,7 @@ def _toolbar_html() -> str:
         # ankiweb-original features (beyond the Anki/AnkiConnect port) live under "Extras".
         "<div class='menu'><span class='lbl' title='ankiweb extras'>Extras ▾</span>"
         "<div class='sub'><a href='/notify'>Push notifications</a></div></div>"
+        f"{_identity_account_link()}"
         "<button class='nm' onclick='ankiwebToggleNight()' title='Toggle night mode'>\U0001F319</button>"
         "</div>"
     )
@@ -74,7 +92,7 @@ def _bottomnav_html(context: str) -> str:
     study_active = context in ("overview", "reviewer", "customstudy", "filtereddeck")
     add_active = context == "add"
     browse_active = context in ("browser", "editor")
-    more_active = context in ("graphs", "preferences", "tools", "about", "notify")
+    more_active = context in ("graphs", "preferences", "tools", "about", "notify", "account")
 
     def tab(href: str, label: str, svg: str, active: bool, is_btn: bool = False) -> str:
         cls = "tab-item active" if active else "tab-item"
@@ -129,6 +147,7 @@ def _bottomnav_html(context: str) -> str:
         f"<a href='/tools'>{tr.qt_accel_tools().replace('&', '')}</a>"
         "<a href='/notify'>Push notifications</a>"
         "<a href='/about' title='Source code (AGPL)'>Source</a>"
+        f"{_identity_account_link()}"
         "<button type='button' onclick='ankiwebToggleNight()' title='Toggle night mode'>"
         "\U0001F319 Toggle night mode</button>"
         "</div></div></div>"
@@ -164,11 +183,13 @@ def render_page(
         '<meta name="theme-color" content="#2563eb">'
         '<link rel="manifest" href="/shell/static/manifest.webmanifest">'
         '<link rel="icon" href="/shell/static/icon.svg" type="image/svg+xml">'
-        '<link rel="stylesheet" href="/shell/static/mobile.css">'
         f"<script>window.__ankiwebContext={json.dumps(context)}</script>"
         f"{_NIGHT_CSS}"
         f"{bar_css}"
         f"{links}"
+        # Load the app shell last so its responsive/theme rules intentionally override
+        # vendored Anki screen CSS. Loading it first caused mixed light/dark palettes.
+        '<link rel="stylesheet" href="/shell/static/mobile.css">'
         f"{scripts}"
         '<script src="/shell/static/bootstrap.js"></script>'
         '<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"})}</script>'

@@ -3,6 +3,7 @@ import asyncio
 import faulthandler
 import os
 import signal
+import sys
 from pathlib import Path
 import uvicorn
 from ankiweb.config import Settings
@@ -36,6 +37,17 @@ async def _serve() -> None:
         for stale in tmp_path.glob("tmp*"):
             if stale.is_file() or stale.is_symlink():
                 stale.unlink(missing_ok=True)
+    if settings.multi_user:
+        # Multi-user mode deliberately exposes only the authenticated web transport.
+        # Legacy AnkiConnect has process-global collection state and remains disabled.
+        from ankiweb.multiuser_app import create_multi_user_app
+
+        web = create_multi_user_app(settings)
+        server = uvicorn.Server(uvicorn.Config(
+            web, host=settings.host, port=settings.port, log_level="info",
+        ))
+        await server.serve()
+        return
     ac_config = AnkiConnectConfig.load(settings.collection_path.parent / "ankiconnect.json")
     service = CollectionService(settings)
     await service.open()
@@ -66,6 +78,10 @@ async def _serve() -> None:
 
 def main() -> None:
     enable_diagnostics()
+    if len(sys.argv) > 1 and sys.argv[1] == "user":
+        from ankiweb.identity.cli import run_identity_cli
+
+        raise SystemExit(run_identity_cli(sys.argv[2:]))
     asyncio.run(_serve())
 
 
