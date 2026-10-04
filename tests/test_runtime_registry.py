@@ -81,6 +81,70 @@ async def test_evict_waits_for_active_lease_then_closes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maintenance_drains_closes_and_blocks_reacquire_until_exit() -> None:
+    created: list[FakeRuntime] = []
+    key = ResourceKey.user(uuid4())
+
+    def factory(_key):
+        created.append(FakeRuntime())
+        return created[-1]
+
+    registry = RuntimeRegistry(factory, wait_seconds=1)
+    lease = await registry.acquire(key)
+    entered = asyncio.Event()
+
+    async def maintain():
+        async with registry.maintenance(key):
+            entered.set()
+            await asyncio.sleep(0.02)
+
+    task = asyncio.create_task(maintain())
+    await asyncio.sleep(0)
+    assert not entered.is_set()
+    await lease.release()
+    await entered.wait()
+    waiting = asyncio.create_task(registry.acquire(key))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await task
+    replacement = await waiting
+    assert len(created) == 2 and created[0].closes == 1
+    await replacement.release()
+    await registry.drain()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_maintenance_wait_restores_existing_runtime_admission() -> None:
+    key = ResourceKey.user(uuid4())
+    registry = RuntimeRegistry(lambda _key: FakeRuntime(), wait_seconds=1)
+    lease = await registry.acquire(key)
+    waiting = asyncio.create_task(registry.maintenance(key).__aenter__())
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    second = await registry.acquire(key)
+    assert second.runtime is lease.runtime
+    await second.release()
+    await lease.release()
+    await registry.drain()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_timeout_does_not_leave_key_reserved() -> None:
+    key = ResourceKey.user(uuid4())
+    registry = RuntimeRegistry(lambda _key: FakeRuntime(), wait_seconds=0.01)
+    lease = await registry.acquire(key)
+    with pytest.raises(RuntimeCapacityError):
+        async with registry.maintenance(key):
+            pass
+    second = await registry.acquire(key)
+    await second.release()
+    await lease.release()
+    await registry.drain()
+
+
+@pytest.mark.asyncio
 async def test_drain_stops_new_admission_and_closes_runtime() -> None:
     runtime = FakeRuntime()
     registry = RuntimeRegistry(lambda _key: runtime)

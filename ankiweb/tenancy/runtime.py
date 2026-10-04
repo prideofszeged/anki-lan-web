@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
@@ -79,6 +80,7 @@ class RuntimeRegistry(Generic[RuntimeT]):
         self._wait_seconds = wait_seconds
         self._entries: dict[ResourceKey, _Entry[RuntimeT]] = {}
         self._reservations: set[ResourceKey] = set()
+        self._maintenance: set[ResourceKey] = set()
         self._condition = asyncio.Condition()
         self._accepting = True
 
@@ -99,7 +101,7 @@ class RuntimeRegistry(Generic[RuntimeT]):
             async with self._condition:
                 if not self._accepting:
                     raise RuntimeError("runtime registry is draining")
-                if key in self._reservations:
+                if key in self._reservations or key in self._maintenance:
                     await self._wait_for_change(deadline)
                     continue
                 entry = self._entries.get(key)
@@ -169,6 +171,48 @@ class RuntimeRegistry(Generic[RuntimeT]):
             raise
         return RuntimeLease(self, key, runtime)
 
+    @asynccontextmanager
+    async def maintenance(
+        self, key: ResourceKey, *, wait_seconds: float | None = None,
+    ):
+        """Hold exclusive access to a resource after closing its live runtime."""
+        loop = asyncio.get_running_loop()
+        timeout = self._wait_seconds if wait_seconds is None else wait_seconds
+        deadline = loop.time() + timeout
+        claimed = False
+        entry: _Entry[RuntimeT] | None = None
+        close_task: asyncio.Task[None] | None = None
+        try:
+            async with self._condition:
+                while key in self._maintenance or key in self._reservations:
+                    await self._wait_for_change(deadline)
+                if not self._accepting:
+                    raise RuntimeError("runtime registry is draining")
+                self._maintenance.add(key)
+                claimed = True
+                entry = self._entries.get(key)
+                if entry is not None:
+                    entry.evict_when_idle = True
+                while entry is not None and entry.leases:
+                    await self._wait_for_change(deadline)
+                if entry is not None:
+                    close_task = self._ensure_close_locked(key, entry)
+            if close_task is not None:
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    await asyncio.shield(close_task)
+                    raise
+            yield
+        finally:
+            async with self._condition:
+                if claimed:
+                    self._maintenance.discard(key)
+                current = self._entries.get(key)
+                if current is entry and close_task is None:
+                    current.evict_when_idle = False
+                self._condition.notify_all()
+
     async def evict(
         self,
         key: ResourceKey,
@@ -236,7 +280,7 @@ class RuntimeRegistry(Generic[RuntimeT]):
             self._accepting = False
             for entry in self._entries.values():
                 entry.evict_when_idle = True
-            while self._reservations or any(
+            while self._reservations or self._maintenance or any(
                 entry.leases for entry in self._entries.values()
             ):
                 await self._wait_for_change(deadline)
