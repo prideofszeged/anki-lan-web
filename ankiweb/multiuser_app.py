@@ -188,14 +188,29 @@ def _shares_html(details, names: dict[str, str], *, csrf_cookie_name: str) -> st
                 "<button type='submit'>Create member invitation</button></form>"
                 "<div class='invite-result' hidden><strong>One-time token</strong>"
                 "<code></code><button class='copy-token'>Copy</button></div>"
+                "<form class='job-form' data-op='provision' data-share='" + html.escape(share.id) + "'>"
+                "<label>Source deck ID<input name='deck_id' inputmode='numeric' required></label>"
+                "<button>Create workspace</button></form>"
+                "<form class='job-form' data-op='publish' data-share='" + html.escape(share.id) + "'>"
+                "<button>Publish next release</button></form>"
             )
+        operations = (
+            owner_tools + "<form class='job-form' data-op='install' data-share='" +
+            html.escape(share.id) + "'><label>Release<input name='version' type='number' min='1' required></label>"
+            "<label>Mode<select name='mode'><option value='follow'>Follow</option><option value='copy'>Copy</option>"
+            "</select></label><button>Install</button></form>"
+            "<form class='job-form' data-op='update'><label>Subscription ID<input name='subscription_id' required></label>"
+            "<label>Target release<input name='target_version' type='number' min='1' required></label>"
+            "<button>Update</button></form><div class='job-status' role='status' aria-live='polite'></div>"
+        )
         cards.append(
             "<article class='share-card'><header><div><h2>" + html.escape(share.name) +
             "</h2><p>" + html.escape(share.state.value.title()) + " · " +
             html.escape(detail.membership.role.value.title()) + "</p></div>"
             "<span class='badge'>" + str(len(detail.members)) + " member" +
             ("s" if len(detail.members) != 1 else "") + "</span></header>"
-            "<ul>" + members + "</ul>" + owner_tools + "</article>"
+            "<ul>" + members + "</ul><details><summary>Deck operations</summary>" +
+            operations + "</details></article>"
         )
     content = "".join(cards) or (
         "<section class='empty'><h2>No shared decks yet</h2>"
@@ -223,7 +238,11 @@ def _shares_html(details, names: dict[str, str], *, csrf_cookie_name: str) -> st
         ".share-invite{display:flex;gap:8px}.invite-result{padding:12px;margin-top:10px;"
         "background:var(--surface-soft);border-radius:9px}.invite-result code{display:block;"
         "overflow-wrap:anywhere;margin:8px 0}.remove-member{color:var(--danger)}"
-        "@media(max-width:600px){.create-share{grid-template-columns:1fr}.share-invite{flex-direction:column}}"
+        "details summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:700}"
+        ".job-form{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 0;border-top:1px solid var(--border)}"
+        ".job-form label{font-size:.82rem;color:var(--muted)}.job-form input,.job-form select{display:block;width:100%}"
+        ".job-status{min-height:32px;padding:8px 0}.job-status.failed{color:var(--danger)}"
+        "@media(max-width:600px){.create-share,.job-form{grid-template-columns:1fr}.share-invite{flex-direction:column}}"
         "</style></head><body><main class='shares-page'><header class='shares-head'><div>"
         "<h1>Shared decks</h1><p>Membership and collaboration access.</p></div>"
         "<a href='/account'>Account</a></header><form class='create-share' id='create-share'>"
@@ -244,7 +263,23 @@ def _shares_html(details, names: dict[str, str], *, csrf_cookie_name: str) -> st
         "=>navigator.clipboard.writeText(v.token)});document.querySelectorAll('.remove-member').forEach(button=>"
         "button.onclick=async()=>{if(!confirm('Remove this member?'))return;const r=await fetch('/api/v1/shares/'"
         "+button.dataset.share+'/members/'+button.dataset.user,{method:'DELETE',headers:headers()});"
-        "if(r.ok)location.reload();else alert('Remove failed')});</script></body></html>"
+        "if(r.ok)location.reload();else alert('Remove failed')});"
+        "async function poll(id,card){const box=card.querySelector('.job-status');for(let i=0;i<180;i++){"
+        "const r=await fetch('/api/v1/jobs/'+id);if(!r.ok){box.textContent='Unable to read job';return}"
+        "const j=await r.json(),p=j.progress||{};box.textContent=[j.state,p.version?'release '+p.version:'',"
+        "p.mode||'',j.error_code?('error: '+j.error_code.replaceAll('_',' ')):''].filter(Boolean).join(' · ');"
+        "box.classList.toggle('failed',j.state==='failed');if(['succeeded','failed','cancelled'].includes(j.state))return;"
+        "await new Promise(x=>setTimeout(x,1000))}}"
+        "document.querySelectorAll('.job-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();"
+        "const d=new FormData(form),op=form.dataset.op,s=form.dataset.share;let url,body=null;"
+        "if(op==='provision'){url='/api/v1/shares/'+s+'/workspace/provision';body={deck_id:Number(d.get('deck_id'))}}"
+        "if(op==='publish')url='/api/v1/shares/'+s+'/releases';if(op==='install'){url='/api/v1/shares/'+s+'/installs';"
+        "body={version:Number(d.get('version')),mode:d.get('mode')}}if(op==='update'){url='/api/v1/subscriptions/'"
+        "+encodeURIComponent(d.get('subscription_id'))+'/updates';body={target_version:Number(d.get('target_version'))}}"
+        "const h=headers();h['idempotency-key']=crypto.randomUUID();const r=await fetch(url,{method:'POST',headers:h,"
+        "body:body?JSON.stringify(body):null}),box=form.closest('.share-card').querySelector('.job-status');"
+        "if(!r.ok){box.textContent='Request failed';box.classList.add('failed');return}poll((await r.json()).id,form.closest('.share-card'))});"
+        "</script></body></html>"
     )
 
 

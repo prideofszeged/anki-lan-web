@@ -39,5 +39,11 @@ def test_multiuser_share_membership_page_is_mobile_and_private(tmp_path):
         assert "Greek A1" in page.text
         assert "viewport-fit=cover" in page.text
         assert "Create a shared deck" in page.text
+        assert "Create workspace" in page.text
+        assert "Publish next release" in page.text
+        assert "Follow" in page.text and "Copy" in page.text
+        assert "Subscription ID" in page.text
+        assert "role='status' aria-live='polite'" in page.text
+        assert "job.error" not in page.text
         account = client.get("/account")
         assert "href='/shares'" in account.text
