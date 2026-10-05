@@ -160,6 +160,11 @@ class ConflictResolutionRequest(BaseModel):
     manual_value: str | None = Field(default=None, max_length=1_000_000)
 
 
+class UpdateContinueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    manual_values: dict[str, str] = Field(default_factory=dict)
+
+
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ShareNotFoundError):
         return HTTPException(404, {"code": "share_not_found", "message": "share not found"})
@@ -262,6 +267,93 @@ def build_sharing_router(
                 raise HTTPException(503, {
                     "code": "job_runner_unavailable", "message": str(exc),
                 }) from exc
+            return JobResponse.of(job)
+
+        @router.post(
+            "/subscriptions/{subscription_id}/updates",
+            response_model=JobResponse, status_code=202,
+        )
+        async def enqueue_subscription_update(
+            subscription_id: str, body: SubscriptionUpdateRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.enqueue_subscription_update(
+                    actor_user_id=principal.user.id, subscription_id=subscription_id,
+                    target_version=body.target_version,
+                    idempotency_key=request.headers.get("idempotency-key", ""),
+                    mirror_preview_digest=body.mirror_preview_digest,
+                    approve_templates=body.approve_templates,
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
+        @router.get("/subscriptions/{subscription_id}/mirror-preview")
+        async def job_mirror_preview(
+            subscription_id: str, target_version: int,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            preview = await _call(
+                job_runner.updater.preview_mirror,
+                actor_user_id=principal.user.id, subscription_id=subscription_id,
+                target_version=target_version,
+            )
+            return {
+                "subscription_id": preview.subscription_id,
+                "target_version": preview.target_version,
+                "tombstones": preview.tombstones, "digest": preview.digest,
+            }
+
+        @router.get("/jobs/{job_id}/conflicts")
+        async def job_conflicts(
+            job_id: str,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            conflicts = await _call(
+                service.repository.list_job_conflicts,
+                actor_user_id=principal.user.id, job_id=job_id,
+            )
+            return {"conflicts": [{
+                "id": item.id, "entity_type": item.entity_type,
+                "source_id": item.source_id, "field": item.field_name,
+                "base_hash": item.base_hash, "local_hash": item.local_hash,
+                "upstream_hash": item.upstream_hash, "resolution": item.resolution,
+            } for item in conflicts]}
+
+        @router.post("/jobs/{job_id}/conflicts/{conflict_id}/resolve")
+        async def resolve_job_conflict(
+            job_id: str, conflict_id: str, body: ConflictResolutionRequest,
+            request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            conflict = await _call(
+                service.repository.resolve_conflict,
+                actor_user_id=principal.user.id, job_id=job_id,
+                conflict_id=conflict_id, resolution=body.resolution,
+                now=service._clock(),
+            )
+            return {"id": conflict.id, "resolution": conflict.resolution}
+
+        @router.post("/jobs/{job_id}/continue", response_model=JobResponse, status_code=202)
+        async def continue_update_job(
+            job_id: str, body: UpdateContinueRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.continue_subscription_update(
+                    actor_user_id=principal.user.id, job_id=job_id,
+                    manual_values=body.manual_values,
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
             return JobResponse.of(job)
 
         @router.get("/jobs/{job_id}", response_model=JobResponse)

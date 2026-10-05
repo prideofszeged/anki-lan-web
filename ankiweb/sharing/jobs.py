@@ -9,6 +9,9 @@ from typing import Callable
 from ankiweb.adapters.anki.sharing import (
     ReleaseInstaller, ReleasePublisher, WorkspaceProvisioner,
 )
+from ankiweb.adapters.anki.collaboration import (
+    SubscriptionUpdater, UnresolvedUpdateError,
+)
 from ankiweb.identity.jobs import Job, JobRepository, JobState, request_digest
 from ankiweb.identity.repository import AuthorizationError, ConflictError
 from ankiweb.tenancy import (
@@ -21,6 +24,7 @@ from .repository import SharingRepository
 WORKSPACE_PROVISION = "share.workspace.provision"
 PUBLISH_RELEASE = "share.release.publish"
 INSTALL_RELEASE = "share.release.install"
+UPDATE_SUBSCRIPTION = "share.update"
 
 
 class SharingJobRunner:
@@ -40,6 +44,7 @@ class SharingJobRunner:
         provisioner: WorkspaceProvisioner | None = None,
         publisher: ReleasePublisher | None = None,
         installer: ReleaseInstaller | None = None,
+        updater: SubscriptionUpdater | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.jobs = jobs
@@ -49,11 +54,13 @@ class SharingJobRunner:
         self.provisioner = provisioner or WorkspaceProvisioner(storage)
         self.publisher = publisher or ReleasePublisher(storage, sharing, clock=clock)
         self.installer = installer or ReleaseInstaller(storage, sharing, clock=clock)
+        self.updater = updater or SubscriptionUpdater(storage, sharing, clock=clock)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._scheduled: set[str] = set()
         self._schedule_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
+        self._continuations: dict[str, dict[str, str]] = {}
         self._worker: asyncio.Task[None] | None = None
         self._accepting = False
 
@@ -63,7 +70,9 @@ class SharingJobRunner:
                 return
             self._accepting = True
             self._worker = asyncio.create_task(self._run(), name="sharing-job-runner")
-        for capability in (WORKSPACE_PROVISION, PUBLISH_RELEASE, INSTALL_RELEASE):
+        for capability in (
+            WORKSPACE_PROVISION, PUBLISH_RELEASE, INSTALL_RELEASE, UPDATE_SUBSCRIPTION,
+        ):
             for job in await asyncio.to_thread(
                 self.jobs.list_recoverable, capability=capability,
             ):
@@ -184,6 +193,74 @@ class SharingJobRunner:
                 await self._schedule(job.id)
             return job
 
+    async def enqueue_subscription_update(
+        self, *, actor_user_id: str, subscription_id: str, target_version: int,
+        idempotency_key: str, mirror_preview_digest: str | None = None,
+        approve_templates: bool = False,
+    ) -> Job:
+        async with self._lifecycle_lock:
+            if not self._accepting:
+                raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
+            subscription = await asyncio.to_thread(
+                self.sharing.get_subscription,
+                actor_user_id=actor_user_id, subscription_id=subscription_id,
+            )
+            if target_version <= subscription.installed_release:
+                raise ValueError("target release must be newer than installed release")
+            progress = {
+                "target_version": target_version,
+                "mirror_preview_digest": mirror_preview_digest,
+                "approve_templates": approve_templates,
+            }
+            request = json.dumps({
+                "subscription_id": subscription_id, **progress,
+            }, sort_keys=True, separators=(",", ":")).encode()
+            job, created = await asyncio.to_thread(
+                self.jobs.create_or_get,
+                actor_user_id=actor_user_id, resource_type="subscription",
+                resource_id=subscription_id, capability=UPDATE_SUBSCRIPTION,
+                idempotency_key=idempotency_key, request_hash=request_digest(request),
+                progress=progress, now=self._clock(),
+            )
+            if created or job.state is JobState.QUEUED:
+                await self._schedule(job.id)
+            return job
+
+    async def continue_subscription_update(
+        self, *, actor_user_id: str, job_id: str,
+        manual_values: dict[str, str],
+    ) -> Job:
+        async with self._lifecycle_lock:
+            job = await asyncio.to_thread(
+                self.jobs.get_for_actor, job_id, actor_user_id=actor_user_id,
+            )
+            if job is None or job.capability != UPDATE_SUBSCRIPTION:
+                raise ValueError("update job not found")
+            if job.state is not JobState.RUNNING:
+                raise ConflictError("update job is not awaiting continuation")
+            await asyncio.to_thread(
+                self.sharing.get_subscription,
+                actor_user_id=actor_user_id, subscription_id=job.resource_id,
+            )
+            conflicts = await asyncio.to_thread(
+                self.sharing.list_job_conflicts,
+                actor_user_id=actor_user_id, job_id=job.id,
+            )
+            if any(item.resolution is None for item in conflicts):
+                raise ConflictError("all update conflicts must be resolved")
+            required_manual = {
+                item.id for item in conflicts if item.resolution == "manual"
+            }
+            if set(manual_values) != required_manual:
+                raise ValueError("all manual conflict values must be supplied atomically")
+            if any(not isinstance(value, str) or len(value) > 1_000_000
+                   for value in manual_values.values()):
+                raise ValueError("manual conflict values are invalid")
+            self._continuations[job.id] = dict(manual_values)
+            await self._schedule(job.id)
+            return job
+
     async def _schedule(self, job_id: str) -> None:
         async with self._schedule_lock:
             if job_id in self._scheduled:
@@ -206,14 +283,22 @@ class SharingJobRunner:
 
     async def _execute(self, job_id: str) -> None:
         job = await asyncio.to_thread(self.jobs.get, job_id)
-        if job is None or job.state is not JobState.QUEUED:
+        continuation = self._continuations.pop(job_id, None)
+        if job is None:
             return
-        try:
-            job = await asyncio.to_thread(
-                self.jobs.transition, job.id,
-                expected=JobState.QUEUED, target=JobState.RUNNING, now=self._clock(),
-            )
-        except ConflictError:
+        if job.state is JobState.QUEUED:
+            try:
+                job = await asyncio.to_thread(
+                    self.jobs.transition, job.id,
+                    expected=JobState.QUEUED, target=JobState.RUNNING, now=self._clock(),
+                )
+            except ConflictError:
+                return
+        elif not (
+            job.state is JobState.RUNNING
+            and job.capability == UPDATE_SUBSCRIPTION
+            and continuation is not None
+        ):
             return
         try:
             if job.capability == WORKSPACE_PROVISION:
@@ -222,6 +307,8 @@ class SharingJobRunner:
                 await self._publish(job)
             elif job.capability == INSTALL_RELEASE:
                 await self._install(job)
+            elif job.capability == UPDATE_SUBSCRIPTION:
+                await self._update(job, continuation or {})
             else:
                 raise ValueError("unsupported sharing job capability")
         except asyncio.CancelledError:
@@ -231,6 +318,8 @@ class SharingJobRunner:
             except ConflictError:
                 pass
             raise
+        except UnresolvedUpdateError:
+            return
         except Exception as exc:
             try:
                 await asyncio.to_thread(
@@ -329,6 +418,18 @@ class SharingJobRunner:
                 },
             )
 
+    async def _update(self, job: Job, manual_values: dict[str, str]) -> None:
+        async with self.registry.maintenance(ResourceKey.user(job.actor_user_id)):
+            await self._uncancellable_thread(
+                self.updater.run,
+                actor_user_id=job.actor_user_id, subscription_id=job.resource_id,
+                target_version=int(job.progress["target_version"]),
+                idempotency_key=job.idempotency_key,
+                mirror_preview_digest=job.progress.get("mirror_preview_digest"),
+                approve_templates=bool(job.progress.get("approve_templates")),
+                manual_values=manual_values,
+            )
+
     @staticmethod
     async def _uncancellable_thread(function, /, *args, **kwargs):
         """Let an in-flight blocking mutation reach its own rollback boundary."""
@@ -344,6 +445,8 @@ class SharingJobRunner:
             return await self._reconcile_publish(job)
         if job.capability == INSTALL_RELEASE:
             return await self._reconcile_install(job)
+        if job.capability == UPDATE_SUBSCRIPTION:
+            return job
         paths = self.storage.share_paths(job.resource_id)
         if paths.collection.exists():
             try:

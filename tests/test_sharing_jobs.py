@@ -10,6 +10,7 @@ import pytest
 from anki.collection import Collection
 
 from ankiweb.adapters.anki.sharing import ReleasePublisher, WorkspaceProvisioner
+from ankiweb.adapters.anki.collaboration import UnresolvedUpdateError
 from ankiweb.identity import (
     IdentityDatabase, IdentityRepository, JobRepository, JobState, request_digest,
 )
@@ -82,6 +83,25 @@ class RecordingPublisher:
             manifest_sha256="a" * 64, bundle_sha256="b" * 64,
         )
 
+
+class RecordingUpdater:
+    def __init__(self, jobs) -> None:
+        self.jobs = jobs
+        self.calls: list[dict] = []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        job = self.jobs.get_by_idempotency(
+            actor_user_id=kwargs["actor_user_id"],
+            idempotency_key=kwargs["idempotency_key"],
+        )
+        if len(self.calls) == 1:
+            raise UnresolvedUpdateError(job.id, ())
+        self.jobs.transition(
+            job.id, expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+            now=NOW, progress={"installed_release": kwargs["target_version"]},
+        )
+        return SimpleNamespace(job_id=job.id, applied=True)
 
 def _stack(tmp_path):
     storage = StorageLayout(tmp_path / "data")
@@ -392,6 +412,27 @@ async def test_follow_install_job_uses_recipient_maintenance_and_recovers_restar
         idempotency_key="follow-install-1",
     )
     assert replay.id == done.id
+    updater = RecordingUpdater(runner.jobs)
+    runner.updater = updater
+    update_lease = await registry.acquire(ResourceKey.user(recipient.id))
+    update = await runner.enqueue_subscription_update(
+        actor_user_id=recipient.id,
+        subscription_id=done.progress["subscription_id"], target_version=2,
+        idempotency_key="update-1",
+    )
+    await asyncio.sleep(0.01)
+    assert updater.calls == []
+    await update_lease.release()
+    for _ in range(100):
+        if updater.calls:
+            break
+        await asyncio.sleep(0.005)
+    assert runner.jobs.get(update.id).state is JobState.RUNNING
+    await runner.continue_subscription_update(
+        actor_user_id=recipient.id, job_id=update.id, manual_values={},
+    )
+    assert (await _finished(runner, update.id)).state is JobState.SUCCEEDED
+    assert len(updater.calls) == 2
     col = Collection(str(storage.user_paths(recipient.id).collection), server=False)
     try:
         assert col.find_notes('"γειά"')
