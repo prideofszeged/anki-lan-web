@@ -236,6 +236,37 @@ def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(t
         assert status.json()["state"] == "succeeded", status.text
         assert storage.share_paths(share["id"]).collection.exists()
 
+        workspace_collection = Collection(
+            str(storage.share_paths(share["id"]).collection), server=False,
+        )
+        try:
+            workspace_note = workspace_collection.get_note(
+                workspace_collection.find_notes("")[0]
+            )
+            guid = workspace_note.guid
+        finally:
+            workspace_collection.close()
+        edit_endpoint = f"/api/v1/shares/{share['id']}/workspace/notes/{guid}"
+        edited = client.patch(
+            edit_endpoint,
+            headers={
+                "x-csrf-token": owner_login.json()["csrf_token"],
+                "origin": "http://testserver",
+            },
+            json={"expected_revision": 0, "fields": {"Front": "χαίρετε"}},
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["revision"] == 1
+        stale = client.patch(
+            edit_endpoint,
+            headers={
+                "x-csrf-token": owner_login.json()["csrf_token"],
+                "origin": "http://testserver",
+            },
+            json={"expected_revision": 0, "fields": {"Front": "stale"}},
+        )
+        assert stale.status_code == 409
+
         release_endpoint = f"/api/v1/shares/{share['id']}/releases"
         assert client.post(release_endpoint).status_code == 403
         assert client.post(

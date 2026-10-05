@@ -356,6 +356,51 @@ def build_sharing_router(
                 raise _http_error(exc) from exc
             return JobResponse.of(job)
 
+        @router.patch("/shares/{share_id}/workspace/notes/{guid}")
+        async def job_edit_workspace_note(
+            share_id: str, guid: str, body: WorkspaceNotePatch, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            try:
+                note = await job_runner.edit_workspace_note(
+                    actor_user_id=principal.user.id, share_id=share_id, guid=guid,
+                    fields=body.fields, expected_revision=body.expected_revision,
+                )
+            except EditConflictError as exc:
+                raise HTTPException(409, {
+                    "code": "edit_conflict", "message": str(exc),
+                    "latest": {
+                        "guid": exc.latest.guid, "fields": exc.latest.fields,
+                        "tags": exc.latest.tags, "revision": exc.latest.revision,
+                    },
+                }) from exc
+            except (AuthorizationError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            return {
+                "note": {"guid": note.guid, "fields": note.fields, "tags": note.tags},
+                "revision": note.revision,
+            }
+
+        @router.post("/shares/{share_id}/workspace/comments", status_code=201)
+        async def job_add_workspace_comment(
+            share_id: str, body: WorkspaceCommentRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            await identity_http.require_csrf(request, principal)
+            comment = await _call(
+                service.repository.add_workspace_comment,
+                actor_user_id=principal.user.id, share_id=share_id,
+                entity_type=body.entity_type, entity_id=body.entity_id,
+                body=body.body, now=service._clock(),
+            )
+            return {
+                "id": comment.id, "share_id": comment.share_id,
+                "entity_type": comment.entity_type, "entity_id": comment.entity_id,
+                "author_user_id": comment.author_user_id, "body": comment.body,
+                "created_at": comment.created_at,
+            }
+
         @router.get("/jobs/{job_id}", response_model=JobResponse)
         async def get_job(
             job_id: str,

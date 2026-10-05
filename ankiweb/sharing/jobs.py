@@ -10,7 +10,7 @@ from ankiweb.adapters.anki.sharing import (
     ReleaseInstaller, ReleasePublisher, WorkspaceProvisioner,
 )
 from ankiweb.adapters.anki.collaboration import (
-    SubscriptionUpdater, UnresolvedUpdateError,
+    SubscriptionUpdater, UnresolvedUpdateError, WorkspaceCollaboration,
 )
 from ankiweb.identity.jobs import Job, JobRepository, JobState, request_digest
 from ankiweb.identity.repository import AuthorizationError, ConflictError
@@ -45,6 +45,7 @@ class SharingJobRunner:
         publisher: ReleasePublisher | None = None,
         installer: ReleaseInstaller | None = None,
         updater: SubscriptionUpdater | None = None,
+        workspace: WorkspaceCollaboration | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.jobs = jobs
@@ -55,6 +56,7 @@ class SharingJobRunner:
         self.publisher = publisher or ReleasePublisher(storage, sharing, clock=clock)
         self.installer = installer or ReleaseInstaller(storage, sharing, clock=clock)
         self.updater = updater or SubscriptionUpdater(storage, sharing, clock=clock)
+        self.workspace = workspace or WorkspaceCollaboration(storage, sharing, clock=clock)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._scheduled: set[str] = set()
@@ -260,6 +262,17 @@ class SharingJobRunner:
             self._continuations[job.id] = dict(manual_values)
             await self._schedule(job.id)
             return job
+
+    async def edit_workspace_note(
+        self, *, actor_user_id: str, share_id: str, guid: str,
+        fields: dict[str, str], expected_revision: int,
+    ):
+        async with self.registry.maintenance(ResourceKey.share(share_id)):
+            return await asyncio.to_thread(
+                self.workspace.edit_note,
+                actor_user_id=actor_user_id, share_id=share_id, guid=guid,
+                fields=fields, expected_revision=expected_revision,
+            )
 
     async def _schedule(self, job_id: str) -> None:
         async with self._schedule_lock:
