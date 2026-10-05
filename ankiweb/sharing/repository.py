@@ -509,6 +509,17 @@ class SharingRepository:
             self._require_member(conn, row["share_id"], actor_user_id)
             return _subscription(row)
 
+    def list_subscriptions(self, *, actor_user_id: str) -> list[ShareSubscription]:
+        with self.database.read() as conn:
+            rows = conn.execute(
+                """SELECT s.* FROM share_subscriptions s
+                   JOIN share_members m ON m.share_id=s.share_id
+                   WHERE s.user_id=? AND m.user_id=? AND m.state='active'
+                   ORDER BY s.created_at,s.id""",
+                (actor_user_id, actor_user_id),
+            ).fetchall()
+            return [_subscription(row) for row in rows]
+
     def set_subscription_policy(
         self, *, actor_user_id: str, subscription_id: str, policy: str, now: datetime,
     ) -> ShareSubscription:

@@ -3,11 +3,16 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from anki.collection import Collection
+from argon2 import PasswordHasher
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from ankiweb.adapters.anki.collaboration import (
     DestructiveTemplateChangeError,
@@ -23,11 +28,14 @@ from ankiweb.adapters.anki.sharing import (
     ReleasePublisher,
     WorkspaceProvisioner,
 )
-from ankiweb.identity import IdentityDatabase, IdentityRepository
+from ankiweb.identity import IdentityDatabase, IdentityRepository, IdentityService, JobRepository
+from ankiweb.identity.http import CSRF_HEADER, build_identity_http
 from ankiweb.identity.jobs import JobState
 from ankiweb.identity.repository import AuthorizationError, NotFoundError
 from ankiweb.sharing import ShareRole, SharingRepository, SharingService
-from ankiweb.tenancy import StorageLayout
+from ankiweb.sharing.http import build_sharing_router
+from ankiweb.sharing.jobs import SharingJobRunner
+from ankiweb.tenancy import ResourceKey, RuntimeRegistry, StorageLayout
 
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -156,6 +164,131 @@ def test_sh7_three_way_conflict_stops_update_and_explicit_resolution_preserves_h
             "SELECT metadata_json FROM audit_events WHERE action='share.conflict.resolved'"
         ).fetchone()[0]
     assert "my local answer" not in audit and "upstream answer" not in audit
+
+
+def test_http_two_manual_conflicts_survive_restart_and_apply_atomically(tmp_path):
+    storage, repository, _, owner, _, viewer, stranger, share, guid, installed = _stack(tmp_path)
+    identities = IdentityRepository(repository.database)
+    identity = IdentityService(
+        identities,
+        password_hasher=PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1),
+        clock=lambda: NOW,
+    )
+    identity.set_password(viewer.id, "viewer-password")
+    identity.set_password(stranger.id, "stranger-password")
+    recipient = storage.user_paths(viewer.id).collection
+    local = Collection(str(recipient), server=False)
+    try:
+        note = local.get_note(local.db.scalar("SELECT id FROM notes WHERE guid=?", guid))
+        note["Front"], note["Back"] = "local front", "local back"
+        local.update_note(note)
+    finally:
+        local.close()
+    with sqlite3.connect(recipient) as conn:
+        before_cards = conn.execute("SELECT id,due,ivl,reps,lapses FROM cards").fetchall()
+        before_reviews = conn.execute("SELECT * FROM revlog").fetchall()
+    WorkspaceCollaboration(storage, repository, clock=lambda: NOW).edit_note(
+        actor_user_id=owner.id, share_id=share.id, guid=guid,
+        fields={"Front": "upstream front", "Back": "upstream back"},
+        expected_revision=0,
+    )
+    ReleasePublisher(storage, repository, clock=lambda: NOW).publish(
+        actor_user_id=owner.id, share_id=share.id,
+    )
+
+    class Runtime:
+        async def open(self): pass
+        async def close(self): pass
+
+    def make_app():
+        registry = RuntimeRegistry(lambda _key: Runtime(), wait_seconds=1)
+        runner = SharingJobRunner(
+            jobs=JobRepository(repository.database), sharing=repository,
+            storage=storage, registry=registry, clock=lambda: NOW,
+        )
+        identity_http = build_identity_http(identity, secure_cookie=False)
+        @asynccontextmanager
+        async def lifespan(_app):
+            await runner.start()
+            yield
+            await runner.stop()
+            await registry.drain()
+        app = FastAPI(lifespan=lifespan)
+        app.include_router(identity_http.router)
+        app.include_router(build_sharing_router(
+            SharingService(repository, clock=lambda: NOW), identity_http,
+            job_runner=runner,
+        ))
+        return app
+
+    with TestClient(make_app()) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "username": "viewer", "password": "viewer-password",
+        })
+        csrf = login.json()["csrf_token"]
+        listed = client.get("/api/v1/subscriptions")
+        assert listed.status_code == 200
+        assert listed.json()["subscriptions"][0]["id"] == installed.subscription_id
+        endpoint = f"/api/v1/subscriptions/{installed.subscription_id}/updates"
+        assert client.post(endpoint, json={"target_version": 2}).status_code == 403
+        queued = client.post(
+            endpoint, headers={CSRF_HEADER: csrf, "idempotency-key": "http-manual-v2"},
+            json={"target_version": 2},
+        )
+        assert queued.status_code == 202, queued.text
+        job_id = queued.json()["id"]
+        for _ in range(200):
+            conflicts = client.get(f"/api/v1/jobs/{job_id}/conflicts")
+            if len(conflicts.json().get("conflicts", [])) == 2:
+                break
+            time.sleep(.01)
+        rows = conflicts.json()["conflicts"]
+        assert {row["field"] for row in rows} == {"Front", "Back"}
+        client.cookies.clear()
+        stranger_login = client.post("/api/v1/auth/login", json={
+            "username": "stranger", "password": "stranger-password",
+        })
+        assert client.get(f"/api/v1/jobs/{job_id}").status_code == 404
+        client.cookies.clear()
+        login = client.post("/api/v1/auth/login", json={
+            "username": "viewer", "password": "viewer-password",
+        })
+        csrf = login.json()["csrf_token"]
+        for row in rows:
+            resolved = client.post(
+                f"/api/v1/jobs/{job_id}/conflicts/{row['id']}/resolve",
+                headers={CSRF_HEADER: csrf},
+                json={"resolution": "manual", "manual_value": "not persisted"},
+            )
+            assert resolved.status_code == 200
+
+    # The RUNNING conflict state survives worker restart; all manual bodies are
+    # resubmitted together and never stored in app.db.
+    with TestClient(make_app()) as client:
+        login = client.post("/api/v1/auth/login", json={
+            "username": "viewer", "password": "viewer-password",
+        })
+        csrf = login.json()["csrf_token"]
+        values = {
+            row["id"]: ("manual front" if row["field"] == "Front" else "manual back")
+            for row in rows
+        }
+        continued = client.post(
+            f"/api/v1/jobs/{job_id}/continue", headers={CSRF_HEADER: csrf},
+            json={"manual_values": values},
+        )
+        assert continued.status_code == 202, continued.text
+        for _ in range(300):
+            status = client.get(f"/api/v1/jobs/{job_id}").json()
+            if status["state"] in {"succeeded", "failed"}:
+                break
+            time.sleep(.01)
+        assert status["state"] == "succeeded", status
+    assert _field(recipient, guid, "Front") == "manual front"
+    assert _field(recipient, guid, "Back") == "manual back"
+    with sqlite3.connect(recipient) as conn:
+        assert conn.execute("SELECT id,due,ivl,reps,lapses FROM cards").fetchall() == before_cards
+        assert conn.execute("SELECT * FROM revlog").fetchall() == before_reviews
 
 
 def test_sh8_tombstone_retires_by_default_and_mirror_requires_exact_preview(tmp_path):

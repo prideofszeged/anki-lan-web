@@ -201,6 +201,20 @@ def build_sharing_router(
     sockets = connections or ShareSocketRegistry()
 
     if job_runner is not None:
+        @router.get("/subscriptions")
+        async def list_subscriptions(
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            subscriptions = await _call(
+                service.repository.list_subscriptions,
+                actor_user_id=principal.user.id,
+            )
+            return {"subscriptions": [{
+                "id": item.id, "share_id": item.share_id, "mode": item.mode,
+                "installed_release": item.installed_release,
+                "conflict_policy": item.conflict_policy,
+            } for item in subscriptions]}
+
         @router.post(
             "/shares/{share_id}/workspace/provision",
             response_model=JobResponse, status_code=202,
