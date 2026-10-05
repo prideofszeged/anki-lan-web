@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -237,6 +239,79 @@ def test_copy_install_final_membership_reauthorization_preserves_original_on_rev
     try:
         assert not col.find_notes('"γειά"')
         assert col.find_notes('"my card"')
+    finally:
+        col.close()
+
+
+def test_revoked_restart_restores_uncommitted_follow_swap_from_trusted_release(tmp_path):
+    storage, repository, owner, recipient, _, share, deck_id, _ = _stack(tmp_path)
+    WorkspaceProvisioner(storage).create_from_owner_deck(
+        actor_user_id=owner.id, owner_collection=storage.user_paths(owner.id).collection,
+        share_id=share.id, deck_id=deck_id, authorize=repository.require_owner,
+    )
+    ReleasePublisher(storage, repository, clock=lambda: NOW).publish(
+        actor_user_id=owner.id, share_id=share.id,
+    )
+    paths = storage.user_paths(recipient.id)
+    saved_old = tmp_path / "saved-old"
+    shutil.copytree(paths.root, saved_old)
+    installer = ReleaseInstaller(storage, repository, clock=lambda: NOW)
+    installer.install(
+        actor_user_id=recipient.id, share_id=share.id, version=1, mode="copy",
+    )
+    operation = str(uuid.uuid4())
+    quarantine = storage.users_root / f".{recipient.id}.install-old-{operation}"
+    shutil.copytree(saved_old, quarantine)
+    with repository.database.transaction() as conn:
+        conn.execute(
+            "UPDATE share_members SET state='removed' WHERE share_id=? AND user_id=?",
+            (share.id, recipient.id),
+        )
+    with pytest.raises(AuthorizationError):
+        ReleasePublisher(storage, repository).validate_release(
+            actor_user_id=recipient.id, share_id=share.id, version=1,
+        )
+    assert installer.recover_interrupted(
+        actor_user_id=recipient.id, share_id=share.id, version=1,
+        mode="follow", operation_id=operation,
+    ) is None
+    col = Collection(str(paths.collection), server=False)
+    try:
+        assert not col.find_notes('"γειά"')
+        assert col.find_notes('"my card"')
+    finally:
+        col.close()
+    assert not quarantine.exists()
+
+
+def test_revoked_restart_retains_committed_follow_and_cleans_residue(tmp_path):
+    storage, repository, owner, recipient, _, share, deck_id, _ = _stack(tmp_path)
+    WorkspaceProvisioner(storage).create_from_owner_deck(
+        actor_user_id=owner.id, owner_collection=storage.user_paths(owner.id).collection,
+        share_id=share.id, deck_id=deck_id, authorize=repository.require_owner,
+    )
+    ReleasePublisher(storage, repository, clock=lambda: NOW).publish(
+        actor_user_id=owner.id, share_id=share.id,
+    )
+    installer = ReleaseInstaller(storage, repository, clock=lambda: NOW)
+    operation = str(uuid.uuid4())
+    installed = installer.install(
+        actor_user_id=recipient.id, share_id=share.id, version=1,
+        mode="follow", operation_id=operation,
+    )
+    with repository.database.transaction() as conn:
+        conn.execute(
+            "UPDATE share_members SET state='removed' WHERE share_id=? AND user_id=?",
+            (share.id, recipient.id),
+        )
+    recovered = installer.recover_interrupted(
+        actor_user_id=recipient.id, share_id=share.id, version=1,
+        mode="follow", operation_id=operation,
+    )
+    assert recovered == installed
+    col = Collection(str(storage.user_paths(recipient.id).collection), server=False)
+    try:
+        assert col.find_notes('"γειά"')
     finally:
         col.close()
 

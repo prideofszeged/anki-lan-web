@@ -326,29 +326,58 @@ class ReleasePublisher:
         record = self.repository.get_release(
             actor_user_id=actor_user_id, share_id=share_id, version=version,
         )
+        return self._validate_release_metadata(
+            share_id=share_id, version=version,
+            manifest_path=record.manifest_path, bundle_path=record.bundle_path,
+            manifest_sha256=record.manifest_sha256,
+            bundle_sha256=record.bundle_sha256,
+        )
+
+    def validate_release_internal(
+        self, *, share_id: str, version: int,
+    ) -> PublishedRelease:
+        """Trusted recovery-only validation; callers must not expose it to actors."""
+        with self.repository.database.read() as conn:
+            record = conn.execute(
+                """SELECT manifest_path,bundle_path,manifest_sha256,bundle_sha256
+                   FROM share_releases WHERE share_id=? AND version=?""",
+                (share_id, version),
+            ).fetchone()
+        if record is None:
+            raise NotFoundError("share release not found")
+        return self._validate_release_metadata(
+            share_id=share_id, version=version,
+            manifest_path=record["manifest_path"], bundle_path=record["bundle_path"],
+            manifest_sha256=record["manifest_sha256"],
+            bundle_sha256=record["bundle_sha256"],
+        )
+
+    def _validate_release_metadata(
+        self, *, share_id: str, version: int, manifest_path: str,
+        bundle_path: str, manifest_sha256: str | None, bundle_sha256: str,
+    ) -> PublishedRelease:
         paths = self.storage.share_paths(share_id)
         expected_manifest = paths.releases / str(version) / "manifest.json"
         expected_bundle = paths.releases / str(version) / "deck.apkg"
-        if record.manifest_path != f"releases/{version}/manifest.json" or \
-                record.bundle_path != f"releases/{version}/deck.apkg":
+        if manifest_path != f"releases/{version}/manifest.json" or \
+                bundle_path != f"releases/{version}/deck.apkg":
             raise ImmutableReleaseError("release path metadata is invalid")
         _safe_files(expected_manifest.parent)
-        if record.manifest_sha256 is None or \
-                _sha256(expected_manifest) != record.manifest_sha256:
+        if manifest_sha256 is None or _sha256(expected_manifest) != manifest_sha256:
             raise ImmutableReleaseError("release manifest checksum mismatch")
-        if _sha256(expected_bundle) != record.bundle_sha256:
+        if _sha256(expected_bundle) != bundle_sha256:
             raise ImmutableReleaseError("release bundle checksum mismatch")
         try:
             manifest = json.loads(expected_manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise ImmutableReleaseError("release manifest is invalid") from exc
         if manifest.get("share_id") != share_id or manifest.get("version") != version or \
-                manifest.get("bundle_sha256") != record.bundle_sha256:
+                manifest.get("bundle_sha256") != bundle_sha256:
             raise ImmutableReleaseError("release manifest identity mismatch")
         return PublishedRelease(
             share_id=share_id, version=version, manifest_path=expected_manifest,
-            bundle_path=expected_bundle, manifest_sha256=record.manifest_sha256,
-            bundle_sha256=record.bundle_sha256,
+            bundle_path=expected_bundle, manifest_sha256=manifest_sha256,
+            bundle_sha256=bundle_sha256,
         )
 
     def recover_interrupted(
@@ -500,7 +529,9 @@ class ReleaseInstaller:
             raise ValueError("install mode must be copy or follow")
         release = ReleasePublisher(
             self.storage, self.repository, clock=self._clock,
-        ).validate_release(actor_user_id=actor_user_id, share_id=share_id, version=version)
+        ).validate_release(
+            actor_user_id=actor_user_id, share_id=share_id, version=version,
+        )
         paths = self.storage.user_paths(actor_user_id)
         _safe_files(paths.root)
         operation = str(uuid.UUID(operation_id)) if operation_id else uuid.uuid4().hex
@@ -591,7 +622,7 @@ class ReleaseInstaller:
         operation = str(uuid.UUID(operation_id))
         release = ReleasePublisher(
             self.storage, self.repository, clock=self._clock,
-        ).validate_release(actor_user_id=actor_user_id, share_id=share_id, version=version)
+        ).validate_release_internal(share_id=share_id, version=version)
         paths = self.storage.user_paths(actor_user_id)
         stage = self.storage.users_root / f".{actor_user_id}.install-{operation}"
         quarantine = self.storage.users_root / f".{actor_user_id}.install-old-{operation}"
