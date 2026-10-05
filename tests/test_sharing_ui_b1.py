@@ -45,6 +45,9 @@ def test_multiuser_share_membership_page_is_mobile_and_private(tmp_path):
         assert "Installed subscription" in page.text
         assert "Preview mirror changes" in page.text
         assert "Apply all resolutions" in page.text
+        assert "Back up workspace and releases" in page.text
+        assert "Restore backup" in page.text
+        assert "'/backups'" in page.text and "'/restores'" in page.text
         assert "/api/v1/subscriptions" in page.text
         assert "role='status' aria-live='polite'" in page.text
         assert "job.error" not in page.text

@@ -165,6 +165,11 @@ class UpdateContinueRequest(BaseModel):
     manual_values: dict[str, str] = Field(default_factory=dict)
 
 
+class ShareRestoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    backup_name: str = Field(min_length=1, max_length=512)
+
+
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ShareNotFoundError):
         return HTTPException(404, {"code": "share_not_found", "message": "share not found"})
@@ -173,6 +178,8 @@ def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, InvalidTokenError):
         return HTTPException(400, {"code": "invalid_invite", "message": str(exc)})
     if isinstance(exc, NotFoundError):
+        return HTTPException(404, {"code": "not_found", "message": str(exc)})
+    if isinstance(exc, FileNotFoundError):
         return HTTPException(404, {"code": "not_found", "message": str(exc)})
     if isinstance(exc, AuthorizationError):
         return HTTPException(403, {"code": "forbidden", "message": str(exc)})
@@ -201,6 +208,69 @@ def build_sharing_router(
     sockets = connections or ShareSocketRegistry()
 
     if job_runner is not None:
+        @router.get("/shares/{share_id}/backups")
+        async def list_share_backups(
+            share_id: str,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ):
+            try:
+                backups = await asyncio.to_thread(
+                    job_runner.backup_manager.list,
+                    actor_user_id=principal.user.id, share_id=share_id,
+                )
+            except (AuthorizationError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            return {"backups": [{
+                "name": item.name, "size": item.size,
+                "created_at": item.created_at,
+            } for item in backups]}
+
+        @router.post(
+            "/shares/{share_id}/backups", response_model=JobResponse,
+            status_code=202,
+        )
+        async def create_share_backup(
+            share_id: str, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.enqueue_share_backup(
+                    actor_user_id=principal.user.id, share_id=share_id,
+                    idempotency_key=request.headers.get("idempotency-key", ""),
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
+        @router.post(
+            "/shares/{share_id}/restores", response_model=JobResponse,
+            status_code=202,
+        )
+        async def restore_share_backup(
+            share_id: str, body: ShareRestoreRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.enqueue_share_restore(
+                    actor_user_id=principal.user.id, share_id=share_id,
+                    backup_name=body.backup_name,
+                    idempotency_key=request.headers.get("idempotency-key", ""),
+                )
+            except (AuthorizationError, ConflictError, NotFoundError,
+                    FileNotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
         @router.get("/subscriptions")
         async def list_subscriptions(
             principal: IdentityPrincipal = Depends(identity_http.require_principal),

@@ -49,6 +49,13 @@ class VerifiedShareBackup:
     comment_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ShareBackupSummary:
+    name: str
+    size: int
+    created_at: datetime
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -81,7 +88,10 @@ class ShareBackupManager:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def create(self, *, actor_user_id: str, share_id: str) -> ShareBackup:
+    def create(
+        self, *, actor_user_id: str, share_id: str,
+        operation_id: str | None = None,
+    ) -> ShareBackup:
         self.repository.require_owner(actor_user_id=actor_user_id, share_id=share_id)
         paths = self.storage.share_paths(share_id)
         if not paths.collection.is_file():
@@ -108,7 +118,19 @@ class ShareBackupManager:
             "comments": [self._comment_payload(item) for item in comments],
         }
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
-        archive = paths.backups / f"share-{share_id}-{stamp}-{uuid.uuid4().hex[:8]}.tar.gz"
+        archive = (
+            paths.backups / f"share-{share_id}-job-{uuid.UUID(operation_id)}.tar.gz"
+            if operation_id else
+            paths.backups / f"share-{share_id}-{stamp}-{uuid.uuid4().hex[:8]}.tar.gz"
+        )
+        if operation_id and archive.exists():
+            verified = self.verify(archive)
+            if verified.share_id != share_id:
+                raise BackupIntegrityError("backup belongs to a different share")
+            return ShareBackup(
+                share_id, archive, archive.with_name(archive.name + ".sha256"),
+                verified.sha256, verified.created_at,
+            )
         partial = archive.with_name(archive.name + ".partial")
         try:
             with partial.open("xb") as raw:
@@ -143,6 +165,34 @@ class ShareBackupManager:
         finally:
             checksum_partial.unlink(missing_ok=True)
         return ShareBackup(share_id, archive, checksum, archive_sha, now)
+
+    def list(self, *, actor_user_id: str, share_id: str) -> list[ShareBackupSummary]:
+        self.repository.require_owner(actor_user_id=actor_user_id, share_id=share_id)
+        root = self.storage.share_paths(share_id).backups
+        if not root.exists():
+            return []
+        prefix = f"share-{share_id}-"
+        results: list[ShareBackupSummary] = []
+        for archive in sorted(root.glob(f"{prefix}*.tar.gz"), reverse=True):
+            if archive.is_symlink() or not archive.is_file():
+                continue
+            details = archive.stat()
+            results.append(ShareBackupSummary(
+                name=archive.name, size=details.st_size,
+                created_at=datetime.fromtimestamp(details.st_mtime, timezone.utc),
+            ))
+        return results
+
+    def resolve_archive(
+        self, *, actor_user_id: str, share_id: str, name: str,
+    ) -> Path:
+        self.repository.require_owner(actor_user_id=actor_user_id, share_id=share_id)
+        if not name or name != Path(name).name or not name.startswith(f"share-{share_id}-"):
+            raise ValueError("invalid backup name")
+        archive = self.storage.share_paths(share_id).backups / name
+        if archive.is_symlink() or not archive.is_file():
+            raise FileNotFoundError("share backup not found")
+        return archive
 
     def verify(self, archive: Path) -> VerifiedShareBackup:
         archive = archive.resolve()

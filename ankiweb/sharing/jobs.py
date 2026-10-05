@@ -19,12 +19,15 @@ from ankiweb.tenancy import (
 )
 
 from .repository import SharingRepository
+from .backup import ShareBackupManager
 
 
 WORKSPACE_PROVISION = "share.workspace.provision"
 PUBLISH_RELEASE = "share.release.publish"
 INSTALL_RELEASE = "share.release.install"
 UPDATE_SUBSCRIPTION = "share.update"
+BACKUP_SHARE = "share.backup.create"
+RESTORE_SHARE = "share.backup.restore"
 
 
 class SharingJobRunner:
@@ -46,6 +49,7 @@ class SharingJobRunner:
         installer: ReleaseInstaller | None = None,
         updater: SubscriptionUpdater | None = None,
         workspace: WorkspaceCollaboration | None = None,
+        backup_manager: ShareBackupManager | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.jobs = jobs
@@ -57,6 +61,9 @@ class SharingJobRunner:
         self.installer = installer or ReleaseInstaller(storage, sharing, clock=clock)
         self.updater = updater or SubscriptionUpdater(storage, sharing, clock=clock)
         self.workspace = workspace or WorkspaceCollaboration(storage, sharing, clock=clock)
+        self.backup_manager = backup_manager or ShareBackupManager(
+            storage, sharing, clock=clock,
+        )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._scheduled: set[str] = set()
@@ -74,6 +81,7 @@ class SharingJobRunner:
             self._worker = asyncio.create_task(self._run(), name="sharing-job-runner")
         for capability in (
             WORKSPACE_PROVISION, PUBLISH_RELEASE, INSTALL_RELEASE, UPDATE_SUBSCRIPTION,
+            BACKUP_SHARE, RESTORE_SHARE,
         ):
             for job in await asyncio.to_thread(
                 self.jobs.list_recoverable, capability=capability,
@@ -229,6 +237,59 @@ class SharingJobRunner:
                 await self._schedule(job.id)
             return job
 
+    async def enqueue_share_backup(
+        self, *, actor_user_id: str, share_id: str, idempotency_key: str,
+    ) -> Job:
+        async with self._lifecycle_lock:
+            if not self._accepting:
+                raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
+            await asyncio.to_thread(
+                self.sharing.require_owner,
+                actor_user_id=actor_user_id, share_id=share_id,
+            )
+            request = json.dumps(
+                {"share_id": share_id}, sort_keys=True, separators=(",", ":"),
+            ).encode()
+            job, created = await asyncio.to_thread(
+                self.jobs.create_or_get,
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability=BACKUP_SHARE,
+                idempotency_key=idempotency_key, request_hash=request_digest(request),
+                progress={}, now=self._clock(),
+            )
+            if created or job.state is JobState.QUEUED:
+                await self._schedule(job.id)
+            return job
+
+    async def enqueue_share_restore(
+        self, *, actor_user_id: str, share_id: str, backup_name: str,
+        idempotency_key: str,
+    ) -> Job:
+        async with self._lifecycle_lock:
+            if not self._accepting:
+                raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
+            await asyncio.to_thread(
+                self.backup_manager.resolve_archive,
+                actor_user_id=actor_user_id, share_id=share_id, name=backup_name,
+            )
+            progress = {"backup_name": backup_name}
+            request = json.dumps(
+                {"share_id": share_id, **progress},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()
+            job, created = await asyncio.to_thread(
+                self.jobs.create_or_get,
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability=RESTORE_SHARE,
+                idempotency_key=idempotency_key, request_hash=request_digest(request),
+                progress=progress, now=self._clock(),
+            )
+            if created or job.state is JobState.QUEUED:
+                await self._schedule(job.id)
+            return job
+
     async def continue_subscription_update(
         self, *, actor_user_id: str, job_id: str,
         manual_values: dict[str, str],
@@ -322,6 +383,10 @@ class SharingJobRunner:
                 await self._install(job)
             elif job.capability == UPDATE_SUBSCRIPTION:
                 await self._update(job, continuation or {})
+            elif job.capability == BACKUP_SHARE:
+                await self._backup_share(job)
+            elif job.capability == RESTORE_SHARE:
+                await self._restore_share(job)
             else:
                 raise ValueError("unsupported sharing job capability")
         except asyncio.CancelledError:
@@ -443,6 +508,45 @@ class SharingJobRunner:
                 manual_values=manual_values,
             )
 
+    async def _backup_share(self, job: Job) -> None:
+        async with self.registry.maintenance(ResourceKey.share(job.resource_id)):
+            result = await self._uncancellable_thread(
+                self.backup_manager.create,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                operation_id=job.id,
+            )
+            await asyncio.to_thread(
+                self.jobs.transition, job.id,
+                expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+                now=self._clock(), progress={
+                    "backup_name": result.archive.name, "sha256": result.sha256,
+                },
+                guard=lambda: self.sharing.require_owner(
+                    actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                ),
+            )
+
+    async def _restore_share(self, job: Job) -> None:
+        async with self.registry.maintenance(ResourceKey.share(job.resource_id)):
+            archive = await asyncio.to_thread(
+                self.backup_manager.resolve_archive,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                name=str(job.progress["backup_name"]),
+            )
+            await self._uncancellable_thread(
+                self.backup_manager.restore,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                archive=archive,
+            )
+            await asyncio.to_thread(
+                self.jobs.transition, job.id,
+                expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+                now=self._clock(), progress={"backup_name": archive.name},
+                guard=lambda: self.sharing.require_owner(
+                    actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                ),
+            )
+
     @staticmethod
     async def _uncancellable_thread(function, /, *args, **kwargs):
         """Let an in-flight blocking mutation reach its own rollback boundary."""
@@ -460,6 +564,8 @@ class SharingJobRunner:
             return await self._reconcile_install(job)
         if job.capability == UPDATE_SUBSCRIPTION:
             return job
+        if job.capability in {BACKUP_SHARE, RESTORE_SHARE}:
+            return await asyncio.to_thread(self.jobs.requeue_running, job.id)
         paths = self.storage.share_paths(job.resource_id)
         if paths.collection.exists():
             try:

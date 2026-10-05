@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tarfile
@@ -8,16 +9,33 @@ from pathlib import Path
 
 import pytest
 from anki.collection import Collection
+from argon2 import PasswordHasher
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from ankiweb.adapters.anki.sharing import ReleasePublisher, WorkspaceProvisioner
-from ankiweb.identity import IdentityDatabase, IdentityRepository
+from ankiweb.identity import (
+    IdentityDatabase, IdentityRepository, IdentityService, request_digest,
+)
+from ankiweb.identity.http import CSRF_HEADER, build_identity_http
+from ankiweb.identity import JobRepository, JobState
 from ankiweb.identity.repository import AuthorizationError
 from ankiweb.sharing import ShareRole, SharingRepository, SharingService
 from ankiweb.sharing.backup import BackupIntegrityError, ShareBackupManager
-from ankiweb.tenancy import StorageLayout
+from ankiweb.sharing.http import build_sharing_router
+from ankiweb.sharing.jobs import SharingJobRunner
+from ankiweb.tenancy import ResourceKey, RuntimeRegistry, StorageLayout
 
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+
+
+class _Runtime:
+    async def open(self):
+        pass
+
+    async def close(self):
+        pass
 
 
 def _stack(tmp_path: Path):
@@ -149,3 +167,128 @@ def test_archive_links_and_cross_share_restore_are_rejected(tmp_path: Path):
     )
     with pytest.raises(BackupIntegrityError, match="regular files"):
         manager.verify(evil)
+
+
+@pytest.mark.asyncio
+async def test_backup_and_restore_jobs_hold_share_maintenance_and_are_idempotent(tmp_path: Path):
+    storage, repository, owner, _, _, share, _, _, manager = _stack(tmp_path)
+    registry = RuntimeRegistry(lambda _key: _Runtime(), wait_seconds=1)
+    runner = SharingJobRunner(
+        jobs=JobRepository(repository.database), sharing=repository, storage=storage,
+        registry=registry, backup_manager=manager, clock=lambda: NOW,
+    )
+    await runner.start()
+    lease = await registry.acquire(ResourceKey.share(share.id))
+    job = await runner.enqueue_share_backup(
+        actor_user_id=owner.id, share_id=share.id, idempotency_key="backup-1",
+    )
+    replay = await runner.enqueue_share_backup(
+        actor_user_id=owner.id, share_id=share.id, idempotency_key="backup-1",
+    )
+    assert replay.id == job.id
+    await asyncio.sleep(0.02)
+    assert runner.jobs.get(job.id).state is JobState.RUNNING
+    await lease.release()
+    for _ in range(200):
+        done = runner.jobs.get(job.id)
+        if done.state in {JobState.SUCCEEDED, JobState.FAILED}:
+            break
+        await asyncio.sleep(0.005)
+    assert done.state is JobState.SUCCEEDED
+    assert set(done.progress) == {"backup_name", "sha256"}
+
+    paths = storage.share_paths(share.id)
+    original = paths.collection.read_bytes()
+    paths.collection.write_bytes(b"broken")
+    restore = await runner.enqueue_share_restore(
+        actor_user_id=owner.id, share_id=share.id,
+        backup_name=done.progress["backup_name"], idempotency_key="restore-1",
+    )
+    for _ in range(200):
+        restored = runner.jobs.get(restore.id)
+        if restored.state in {JobState.SUCCEEDED, JobState.FAILED}:
+            break
+        await asyncio.sleep(0.005)
+    assert restored.state is JobState.SUCCEEDED
+    assert paths.collection.read_bytes() == original
+    await runner.stop()
+    await registry.drain()
+
+
+def test_backup_http_is_csrf_protected_owner_only_and_path_safe(tmp_path: Path):
+    _, repository, owner, member, _, share, _, _, manager = _stack(tmp_path)
+    identity = IdentityService(
+        IdentityRepository(repository.database),
+        password_hasher=PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1),
+        clock=lambda: NOW,
+    )
+    identity.set_password(owner.id, "owner-password")
+    identity.set_password(member.id, "member-password")
+    identity_http = build_identity_http(identity, secure_cookie=False)
+    jobs = JobRepository(repository.database)
+
+    class _EnqueueOnly:
+        backup_manager = manager
+
+        @staticmethod
+        def _key(value):
+            if not value:
+                raise ValueError("idempotency key required")
+
+        async def enqueue_share_backup(self, *, actor_user_id, share_id, idempotency_key):
+            self._key(idempotency_key)
+            repository.require_owner(actor_user_id=actor_user_id, share_id=share_id)
+            return jobs.create_or_get(
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability="share.backup.create",
+                idempotency_key=idempotency_key, request_hash=request_digest(b"backup"),
+                progress={}, now=NOW,
+            )[0]
+
+        async def enqueue_share_restore(
+            self, *, actor_user_id, share_id, backup_name, idempotency_key,
+        ):
+            self._key(idempotency_key)
+            manager.resolve_archive(
+                actor_user_id=actor_user_id, share_id=share_id, name=backup_name,
+            )
+            return jobs.create_or_get(
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability="share.backup.restore",
+                idempotency_key=idempotency_key, request_hash=request_digest(backup_name.encode()),
+                progress={"backup_name": backup_name}, now=NOW,
+            )[0]
+
+    app = FastAPI()
+    app.include_router(identity_http.router)
+    app.include_router(build_sharing_router(
+        SharingService(repository, clock=lambda: NOW), identity_http,
+        job_runner=_EnqueueOnly(),
+    ))
+
+    def login(username, password):
+        client = TestClient(app)
+        response = client.post("/api/v1/auth/login", json={
+            "username": username, "password": password,
+        })
+        assert response.status_code == 200
+        return client, response.json()["csrf_token"]
+
+    owner_client, owner_csrf = login("owner", "owner-password")
+    member_client, member_csrf = login("member", "member-password")
+    assert owner_client.get(f"/api/v1/shares/{share.id}/backups").json() == {"backups": []}
+    assert member_client.get(f"/api/v1/shares/{share.id}/backups").status_code == 403
+    endpoint = f"/api/v1/shares/{share.id}/backups"
+    assert owner_client.post(endpoint, headers={"idempotency-key": "backup"}).status_code == 403
+    assert owner_client.post(endpoint, headers={CSRF_HEADER: owner_csrf}).status_code == 422
+    created = owner_client.post(endpoint, headers={
+        CSRF_HEADER: owner_csrf, "idempotency-key": "backup",
+    })
+    assert created.status_code == 202
+    assert member_client.post(endpoint, headers={
+        CSRF_HEADER: member_csrf, "idempotency-key": "member-backup",
+    }).status_code == 403
+    restore = owner_client.post(f"/api/v1/shares/{share.id}/restores", headers={
+        CSRF_HEADER: owner_csrf, "idempotency-key": "restore",
+    }, json={"backup_name": "../escape.tar.gz"})
+    assert restore.status_code == 422
