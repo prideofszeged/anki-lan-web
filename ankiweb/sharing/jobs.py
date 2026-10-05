@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import Callable
 
-from ankiweb.adapters.anki.sharing import ReleasePublisher, WorkspaceProvisioner
+from ankiweb.adapters.anki.sharing import (
+    ReleaseInstaller, ReleasePublisher, WorkspaceProvisioner,
+)
 from ankiweb.identity.jobs import Job, JobRepository, JobState, request_digest
 from ankiweb.identity.repository import AuthorizationError, ConflictError
 from ankiweb.tenancy import (
@@ -17,6 +20,7 @@ from .repository import SharingRepository
 
 WORKSPACE_PROVISION = "share.workspace.provision"
 PUBLISH_RELEASE = "share.release.publish"
+INSTALL_RELEASE = "share.release.install"
 
 
 class SharingJobRunner:
@@ -35,6 +39,7 @@ class SharingJobRunner:
         registry: RuntimeRegistry,
         provisioner: WorkspaceProvisioner | None = None,
         publisher: ReleasePublisher | None = None,
+        installer: ReleaseInstaller | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.jobs = jobs
@@ -43,6 +48,7 @@ class SharingJobRunner:
         self.registry = registry
         self.provisioner = provisioner or WorkspaceProvisioner(storage)
         self.publisher = publisher or ReleasePublisher(storage, sharing, clock=clock)
+        self.installer = installer or ReleaseInstaller(storage, sharing, clock=clock)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._scheduled: set[str] = set()
@@ -57,7 +63,7 @@ class SharingJobRunner:
                 return
             self._accepting = True
             self._worker = asyncio.create_task(self._run(), name="sharing-job-runner")
-        for capability in (WORKSPACE_PROVISION, PUBLISH_RELEASE):
+        for capability in (WORKSPACE_PROVISION, PUBLISH_RELEASE, INSTALL_RELEASE):
             for job in await asyncio.to_thread(
                 self.jobs.list_recoverable, capability=capability,
             ):
@@ -86,6 +92,7 @@ class SharingJobRunner:
         async with self._lifecycle_lock:
             if not self._accepting:
                 raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
             if deck_id <= 0:
                 raise ValueError("deck_id must be positive")
             await asyncio.to_thread(
@@ -118,6 +125,7 @@ class SharingJobRunner:
         async with self._lifecycle_lock:
             if not self._accepting:
                 raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
             existing = await asyncio.to_thread(
                 self.jobs.get_by_idempotency,
                 actor_user_id=actor_user_id, idempotency_key=idempotency_key,
@@ -139,6 +147,36 @@ class SharingJobRunner:
                 self.jobs.create_or_get,
                 actor_user_id=actor_user_id, resource_type="share",
                 resource_id=share_id, capability=PUBLISH_RELEASE,
+                idempotency_key=idempotency_key, request_hash=request_digest(request),
+                progress=progress, now=self._clock(),
+            )
+            if created or job.state is JobState.QUEUED:
+                await self._schedule(job.id)
+            return job
+
+    async def enqueue_release_install(
+        self, *, actor_user_id: str, share_id: str, version: int, mode: str,
+        idempotency_key: str,
+    ) -> Job:
+        async with self._lifecycle_lock:
+            if not self._accepting:
+                raise RuntimeError("sharing job runner is unavailable")
+            self._validate_idempotency_key(idempotency_key)
+            if mode not in {"copy", "follow"} or version < 1:
+                raise ValueError("valid version and copy/follow mode required")
+            await asyncio.to_thread(
+                self.sharing.require_member,
+                actor_user_id=actor_user_id, share_id=share_id,
+            )
+            progress = {"version": version, "mode": mode}
+            request = json.dumps(
+                {"share_id": share_id, **progress},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()
+            job, created = await asyncio.to_thread(
+                self.jobs.create_or_get,
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability=INSTALL_RELEASE,
                 idempotency_key=idempotency_key, request_hash=request_digest(request),
                 progress=progress, now=self._clock(),
             )
@@ -182,6 +220,8 @@ class SharingJobRunner:
                 await self._provision(job)
             elif job.capability == PUBLISH_RELEASE:
                 await self._publish(job)
+            elif job.capability == INSTALL_RELEASE:
+                await self._install(job)
             else:
                 raise ValueError("unsupported sharing job capability")
         except asyncio.CancelledError:
@@ -268,6 +308,27 @@ class SharingJobRunner:
                 },
             )
 
+    async def _install(self, job: Job) -> None:
+        async with self.registry.maintenance(ResourceKey.user(job.actor_user_id)):
+            await asyncio.to_thread(
+                self.sharing.require_member,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+            )
+            result = await self._uncancellable_thread(
+                self.installer.install,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                version=int(job.progress["version"]), mode=str(job.progress["mode"]),
+                operation_id=job.id, authorize_before_commit=self.sharing.require_member,
+            )
+            await asyncio.to_thread(
+                self.jobs.transition, job.id,
+                expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+                now=self._clock(), progress={
+                    "version": result.installed_release, "mode": result.mode,
+                    "subscription_id": result.subscription_id,
+                },
+            )
+
     @staticmethod
     async def _uncancellable_thread(function, /, *args, **kwargs):
         """Let an in-flight blocking mutation reach its own rollback boundary."""
@@ -281,6 +342,8 @@ class SharingJobRunner:
     async def _reconcile_interrupted(self, job: Job) -> Job:
         if job.capability == PUBLISH_RELEASE:
             return await self._reconcile_publish(job)
+        if job.capability == INSTALL_RELEASE:
+            return await self._reconcile_install(job)
         paths = self.storage.share_paths(job.resource_id)
         if paths.collection.exists():
             try:
@@ -334,6 +397,27 @@ class SharingJobRunner:
             },
         )
 
+    async def _reconcile_install(self, job: Job) -> Job:
+        try:
+            result = await asyncio.to_thread(
+                self.installer.recover_interrupted,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                version=int(job.progress["version"]), mode=str(job.progress["mode"]),
+                operation_id=job.id,
+            )
+        except Exception:
+            result = None
+        if result is None:
+            return await asyncio.to_thread(self.jobs.requeue_running, job.id)
+        return await asyncio.to_thread(
+            self.jobs.transition, job.id,
+            expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+            now=self._clock(), progress={
+                "version": result.installed_release, "mode": result.mode,
+                "subscription_id": result.subscription_id,
+            },
+        )
+
     @staticmethod
     def _safe_error(exc: BaseException) -> str:
         if isinstance(exc, AuthorizationError):
@@ -343,3 +427,10 @@ class SharingJobRunner:
         if isinstance(exc, TimeoutError):
             return "maintenance_timeout"
         return "operation_failed"
+
+    @staticmethod
+    def _validate_idempotency_key(value: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", value):
+            raise ValueError(
+                "idempotency key must be 1 to 256 URL-safe ASCII characters"
+            )

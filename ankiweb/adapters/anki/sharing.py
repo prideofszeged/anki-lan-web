@@ -494,6 +494,7 @@ class ReleaseInstaller:
 
     def install(
         self, *, actor_user_id: str, share_id: str, version: int, mode: str,
+        operation_id: str | None = None, authorize_before_commit=None,
     ) -> InstallResult:
         if mode not in {"copy", "follow"}:
             raise ValueError("install mode must be copy or follow")
@@ -502,8 +503,11 @@ class ReleaseInstaller:
         ).validate_release(actor_user_id=actor_user_id, share_id=share_id, version=version)
         paths = self.storage.user_paths(actor_user_id)
         _safe_files(paths.root)
-        stage = self.storage.users_root / f".{actor_user_id}.install-{uuid.uuid4().hex}"
-        quarantine = self.storage.users_root / f".{actor_user_id}.install-old-{uuid.uuid4().hex}"
+        operation = str(uuid.UUID(operation_id)) if operation_id else uuid.uuid4().hex
+        stage = self.storage.users_root / f".{actor_user_id}.install-{operation}"
+        quarantine = self.storage.users_root / f".{actor_user_id}.install-old-{operation}"
+        if stage.exists() or quarantine.exists() or stage.is_symlink() or quarantine.is_symlink():
+            raise FileExistsError("install operation workspace already exists")
         _copy_tree(paths.root, stage)
         stage_collection = stage / "anki" / "collection.anki2"
         try:
@@ -526,14 +530,32 @@ class ReleaseInstaller:
             self._check_recipient_quota(actor_user_id, stage)
             entities, target_deck_id = self._entity_mappings(stage_collection, manifest)
             _secure_tree(stage)
-            os.replace(paths.root, quarantine)
-            try:
-                os.replace(stage, paths.root)
-                self._fsync_directory(self.storage.users_root)
-            except BaseException:
-                os.replace(quarantine, paths.root)
-                self._fsync_directory(self.storage.users_root)
-                raise
+            def swap() -> None:
+                os.replace(paths.root, quarantine)
+                try:
+                    os.replace(stage, paths.root)
+                    self._fsync_directory(self.storage.users_root)
+                except BaseException:
+                    os.replace(quarantine, paths.root)
+                    self._fsync_directory(self.storage.users_root)
+                    raise
+
+            if mode == "copy":
+                # Hold SQLite's writer reservation from final membership check through
+                # the filesystem commit so revocation cannot race a copy install.
+                with self.repository.database.transaction() as conn:
+                    self.repository._require_member(conn, share_id, actor_user_id)
+                    if authorize_before_commit is not None:
+                        authorize_before_commit(
+                            actor_user_id=actor_user_id, share_id=share_id,
+                        )
+                    swap()
+            else:
+                if authorize_before_commit is not None:
+                    authorize_before_commit(
+                        actor_user_id=actor_user_id, share_id=share_id,
+                    )
+                swap()
             subscription_id = None
             try:
                 if mode == "follow":
@@ -543,7 +565,7 @@ class ReleaseInstaller:
                     )
                     subscription_id = subscription.id
             except BaseException:
-                failed = self.storage.users_root / f".{actor_user_id}.failed-{uuid.uuid4().hex}"
+                failed = self.storage.users_root / f".{actor_user_id}.failed-{operation}"
                 os.replace(paths.root, failed)
                 os.replace(quarantine, paths.root)
                 self._fsync_directory(self.storage.users_root)
@@ -558,6 +580,73 @@ class ReleaseInstaller:
         finally:
             if stage.exists() and not stage.is_symlink():
                 shutil.rmtree(stage)
+
+    def recover_interrupted(
+        self, *, actor_user_id: str, share_id: str, version: int, mode: str,
+        operation_id: str,
+    ) -> InstallResult | None:
+        """Resolve deterministic install roots to verified-new or restored-old state."""
+        if mode not in {"copy", "follow"}:
+            raise ValueError("install mode must be copy or follow")
+        operation = str(uuid.UUID(operation_id))
+        release = ReleasePublisher(
+            self.storage, self.repository, clock=self._clock,
+        ).validate_release(actor_user_id=actor_user_id, share_id=share_id, version=version)
+        paths = self.storage.user_paths(actor_user_id)
+        stage = self.storage.users_root / f".{actor_user_id}.install-{operation}"
+        quarantine = self.storage.users_root / f".{actor_user_id}.install-old-{operation}"
+        manifest = json.loads(release.manifest_path.read_text(encoding="utf-8"))
+        installed = self._root_has_release(paths.root, manifest)
+        subscription_id = None
+        if mode == "follow":
+            with self.repository.database.read() as conn:
+                row = conn.execute(
+                    """SELECT id FROM share_subscriptions
+                       WHERE share_id=? AND user_id=? AND installed_release=?""",
+                    (share_id, actor_user_id, version),
+                ).fetchone()
+                subscription_id = row[0] if row else None
+        if installed and (mode == "copy" or subscription_id is not None):
+            for residue in (stage, quarantine):
+                if residue.is_symlink():
+                    raise ValueError("symlink not allowed in install recovery")
+                if residue.exists():
+                    shutil.rmtree(residue)
+            self._fsync_directory(self.storage.users_root)
+            return InstallResult(
+                share_id=share_id, installed_release=version, mode=mode,
+                subscription_id=subscription_id,
+            )
+        if quarantine.exists():
+            if quarantine.is_symlink():
+                raise ValueError("symlink not allowed in install recovery")
+            failed = self.storage.users_root / f".{actor_user_id}.failed-{operation}"
+            if paths.root.exists():
+                os.replace(paths.root, failed)
+            os.replace(quarantine, paths.root)
+            if failed.exists():
+                shutil.rmtree(failed)
+        if stage.exists():
+            if stage.is_symlink():
+                raise ValueError("symlink not allowed in install recovery")
+            shutil.rmtree(stage)
+        self._fsync_directory(self.storage.users_root)
+        return None
+
+    @staticmethod
+    def _root_has_release(root: Path, manifest: dict) -> bool:
+        collection = root / "anki" / "collection.anki2"
+        if not collection.is_file() or not _integrity_ok(collection):
+            return False
+        with sqlite3.connect(collection) as conn:
+            guids = {row[0] for row in conn.execute("SELECT guid FROM notes")}
+        if not set(manifest["entities"]["notes"]).issubset(guids):
+            return False
+        media = root / "anki" / "collection.media"
+        return all(
+            (media / name).is_file() and _sha256(media / name) == digest
+            for name, digest in manifest["media_sha256"].items()
+        )
 
     @staticmethod
     def _schedule_snapshot(collection: Path, card_ids: set[int] | None = None):

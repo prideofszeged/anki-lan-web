@@ -9,10 +9,11 @@ from types import SimpleNamespace
 import pytest
 from anki.collection import Collection
 
+from ankiweb.adapters.anki.sharing import ReleasePublisher, WorkspaceProvisioner
 from ankiweb.identity import (
     IdentityDatabase, IdentityRepository, JobRepository, JobState, request_digest,
 )
-from ankiweb.sharing import SharingRepository, SharingService
+from ankiweb.sharing import ShareRole, SharingRepository, SharingService
 from ankiweb.sharing.jobs import (
     PUBLISH_RELEASE, SharingJobRunner, WORKSPACE_PROVISION,
 )
@@ -89,9 +90,14 @@ def _stack(tmp_path):
     owner = identities.create_user(username="owner", now=NOW)
     other = identities.create_user(username="other", now=NOW)
     owner_paths = storage.prepare_user(owner.id)
+    other_paths = storage.prepare_user(other.id)
+    Collection(str(other_paths.collection), server=False).close()
     col = Collection(str(owner_paths.collection), server=False)
     try:
         deck_id = int(col.decks.id("Greek"))
+        note = col.new_note(col.models.by_name("Basic"))
+        note["Front"], note["Back"] = "γειά", "hello"
+        col.add_note(note, deck_id)
     finally:
         col.close()
     sharing = SharingRepository(identities.database)
@@ -294,6 +300,10 @@ async def test_publish_job_waits_for_share_runtime_and_records_release_result(tm
         provisioner=base.provisioner, publisher=publisher, clock=lambda: NOW,
     )
     await runner.start()
+    with pytest.raises(ValueError, match="idempotency"):
+        await runner.enqueue_release_publish(
+            actor_user_id=owner.id, share_id=share.id, idempotency_key="",
+        )
     lease = await registry.acquire(ResourceKey.share(share.id))
     job = await runner.enqueue_release_publish(
         actor_user_id=owner.id, share_id=share.id, idempotency_key="publish-1",
@@ -342,3 +352,66 @@ async def test_publish_restart_reconciles_completed_release_without_republishing
     assert publisher.calls == []
     await runner.stop()
     await registry.drain()
+
+
+@pytest.mark.asyncio
+async def test_follow_install_job_uses_recipient_maintenance_and_recovers_restart(tmp_path):
+    storage, _, owner, recipient, share, deck_id, registry, _, base = _stack(tmp_path)
+    service = SharingService(base.sharing, clock=lambda: NOW)
+    invite = service.create_invite(
+        actor_user_id=owner.id, share_id=share.id, role=ShareRole.VIEWER,
+        intended_user_id=recipient.id,
+    )
+    service.accept_invite(actor_user_id=recipient.id, token=invite.token)
+    WorkspaceProvisioner(storage).create_from_owner_deck(
+        actor_user_id=owner.id, owner_collection=storage.user_paths(owner.id).collection,
+        share_id=share.id, deck_id=deck_id, authorize=base.sharing.require_owner,
+    )
+    ReleasePublisher(storage, base.sharing, clock=lambda: NOW).publish(
+        actor_user_id=owner.id, share_id=share.id,
+    )
+    runner = SharingJobRunner(
+        jobs=base.jobs, sharing=base.sharing, storage=storage, registry=registry,
+        clock=lambda: NOW,
+    )
+    await runner.start()
+    lease = await registry.acquire(ResourceKey.user(recipient.id))
+    job = await runner.enqueue_release_install(
+        actor_user_id=recipient.id, share_id=share.id, version=1, mode="follow",
+        idempotency_key="follow-install-1",
+    )
+    await asyncio.sleep(0.01)
+    assert runner.jobs.get(job.id).state is JobState.RUNNING
+    await lease.release()
+    done = await _finished(runner, job.id)
+    assert done.state is JobState.SUCCEEDED
+    assert done.progress["mode"] == "follow"
+    assert done.progress["subscription_id"]
+    replay = await runner.enqueue_release_install(
+        actor_user_id=recipient.id, share_id=share.id, version=1, mode="follow",
+        idempotency_key="follow-install-1",
+    )
+    assert replay.id == done.id
+    col = Collection(str(storage.user_paths(recipient.id).collection), server=False)
+    try:
+        assert col.find_notes('"γειά"')
+    finally:
+        col.close()
+    await runner.stop()
+    await registry.drain()
+
+    # Simulate process loss after the filesystem/database install committed but before
+    # the terminal job state became durable.
+    with base.jobs.database.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET state='running',finished_at=NULL WHERE id=?", (job.id,),
+        )
+    registry2 = RuntimeRegistry(lambda _key: FakeRuntime(), wait_seconds=1)
+    resumed = SharingJobRunner(
+        jobs=base.jobs, sharing=base.sharing, storage=storage, registry=registry2,
+        clock=lambda: NOW,
+    )
+    await resumed.start()
+    assert resumed.jobs.get(job.id).state is JobState.SUCCEEDED
+    await resumed.stop()
+    await registry2.drain()

@@ -31,6 +31,12 @@ class WorkspaceProvisionRequest(BaseModel):
     deck_id: int = Field(gt=0)
 
 
+class ReleaseInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=1)
+    mode: Literal["copy", "follow"]
+
+
 class JobResponse(BaseModel):
     id: str
     resource_type: str
@@ -225,6 +231,29 @@ def build_sharing_router(
             try:
                 job = await job_runner.enqueue_release_publish(
                     actor_user_id=principal.user.id, share_id=share_id,
+                    idempotency_key=request.headers.get("idempotency-key", ""),
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
+        @router.post(
+            "/shares/{share_id}/installs",
+            response_model=JobResponse, status_code=202,
+        )
+        async def install_release(
+            share_id: str, body: ReleaseInstallRequest, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.enqueue_release_install(
+                    actor_user_id=principal.user.id, share_id=share_id,
+                    version=body.version, mode=body.mode,
                     idempotency_key=request.headers.get("idempotency-key", ""),
                 )
             except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:

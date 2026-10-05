@@ -213,6 +213,14 @@ def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(t
                 "origin": "http://testserver", "idempotency-key": "publish-idor",
             },
         ).status_code == 404
+        assert client.post(
+            f"/api/v1/shares/{share['id']}/installs",
+            headers={
+                "x-csrf-token": bob_login.json()["csrf_token"],
+                "origin": "http://testserver", "idempotency-key": "install-idor",
+            },
+            json={"version": 1, "mode": "follow"},
+        ).status_code == 404
 
         client.cookies.clear()
         owner_login = client.post("/api/v1/auth/login", json={
@@ -230,6 +238,13 @@ def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(t
 
         release_endpoint = f"/api/v1/shares/{share['id']}/releases"
         assert client.post(release_endpoint).status_code == 403
+        assert client.post(
+            release_endpoint,
+            headers={
+                "x-csrf-token": owner_login.json()["csrf_token"],
+                "origin": "http://testserver",
+            },
+        ).status_code == 422
         published = client.post(
             release_endpoint,
             headers={

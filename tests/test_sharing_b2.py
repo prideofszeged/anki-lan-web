@@ -213,6 +213,34 @@ def test_install_quota_failure_leaves_recipient_root_unchanged(tmp_path):
     assert _schedule_snapshot(storage.user_paths(recipient.id).collection, card_id)[0]
 
 
+def test_copy_install_final_membership_reauthorization_preserves_original_on_revoke(tmp_path):
+    storage, repository, owner, recipient, _, share, deck_id, card_id = _stack(tmp_path)
+    WorkspaceProvisioner(storage).create_from_owner_deck(
+        actor_user_id=owner.id, owner_collection=storage.user_paths(owner.id).collection,
+        share_id=share.id, deck_id=deck_id, authorize=repository.require_owner,
+    )
+    ReleasePublisher(storage, repository, clock=lambda: NOW).publish(
+        actor_user_id=owner.id, share_id=share.id,
+    )
+    before = _schedule_snapshot(storage.user_paths(recipient.id).collection, card_id)
+
+    def revoked(**_kwargs):
+        raise AuthorizationError("membership revoked")
+
+    with pytest.raises(AuthorizationError, match="revoked"):
+        ReleaseInstaller(storage, repository, clock=lambda: NOW).install(
+            actor_user_id=recipient.id, share_id=share.id, version=1, mode="copy",
+            authorize_before_commit=revoked,
+        )
+    assert _schedule_snapshot(storage.user_paths(recipient.id).collection, card_id) == before
+    col = Collection(str(storage.user_paths(recipient.id).collection), server=False)
+    try:
+        assert not col.find_notes('"γειά"')
+        assert col.find_notes('"my card"')
+    finally:
+        col.close()
+
+
 def test_release_path_tamper_and_failed_validation_never_commit_artifact(tmp_path, monkeypatch):
     storage, repository, owner, _, _, share, deck_id, _ = _stack(tmp_path)
     WorkspaceProvisioner(storage).create_from_owner_deck(
