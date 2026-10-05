@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ankiweb.auth import LoginLimiter, login_client
 
-from .models import GlobalRole, Session, User
+from .models import AccountState, GlobalRole, Session, User
 from .repository import (
     AuthorizationError, ConflictError, ExpiredTokenError, IdentityError,
     InvalidTokenError, LastOwnerError, NotFoundError,
@@ -117,6 +117,42 @@ class InviteAcceptRequest(BaseModel):
     display_name: str = Field(default="", max_length=128)
 
 
+class AdminQuotaResponse(BaseModel):
+    storage_bytes: int
+    import_bytes: int
+    active_jobs: int
+    active_sessions: int
+    review_sockets: int
+
+
+class AdminUserResponse(BaseModel):
+    id: str
+    username: str
+    display_name: str
+    global_role: GlobalRole
+    state: AccountState
+    created_at: datetime
+    last_login_at: datetime | None
+    usage_bytes: int | None
+    backup_age_seconds: int | None
+    quota: AdminQuotaResponse
+
+
+class AdminUserListResponse(BaseModel):
+    users: list[AdminUserResponse]
+
+
+class AdminUserPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: AccountState | None = None
+    storage_bytes: int | None = Field(default=None, ge=1)
+    import_bytes: int | None = Field(default=None, ge=1)
+
+
+class AdminAuditResponse(BaseModel):
+    events: list[dict]
+
+
 AttemptGate = Callable[[Request], bool | Awaitable[bool]]
 SuccessCallback = Callable[[Request], None | Awaitable[None]]
 
@@ -167,11 +203,15 @@ class IdentityHttp:
         login_succeeded: SuccessCallback | None = None,
         invite_attempt_gate: AttemptGate | None = None,
         trusted_proxy_cidrs: tuple[str, ...] = (),
+        usage_provider: Callable[[str], int] | None = None,
+        backup_age_provider: Callable[[str], int | None] | None = None,
     ) -> None:
         self.service = service
         self.cookie_name = cookie_name
         self.csrf_cookie_name = f"{cookie_name}_csrf"
         self.secure_cookie = secure_cookie
+        self.usage_provider = usage_provider
+        self.backup_age_provider = backup_age_provider
         if attempt_gate is None:
             login_limiter = LoginLimiter()
             self.attempt_gate = lambda request: login_limiter.allow(
@@ -253,6 +293,29 @@ class IdentityHttp:
 
     def _add_routes(self) -> None:
         router = self.router
+
+        async def admin_user_response(record) -> AdminUserResponse:
+            usage = (
+                await _callback(self.usage_provider, record.user.id)
+                if self.usage_provider is not None else None
+            )
+            backup_age = (
+                await _callback(self.backup_age_provider, record.user.id)
+                if self.backup_age_provider is not None else None
+            )
+            quota = record.quota
+            return AdminUserResponse(
+                id=record.user.id, username=record.user.username,
+                display_name=record.user.display_name,
+                global_role=record.user.global_role, state=record.user.state,
+                created_at=record.user.created_at, last_login_at=record.last_login_at,
+                usage_bytes=usage, backup_age_seconds=backup_age,
+                quota=AdminQuotaResponse(
+                    storage_bytes=quota.storage_bytes, import_bytes=quota.import_bytes,
+                    active_jobs=quota.active_jobs, active_sessions=quota.active_sessions,
+                    review_sockets=quota.review_sockets,
+                ),
+            )
 
         @router.post(
             "/auth/login", response_model=LoginResponse, tags=["identity"],
@@ -411,6 +474,71 @@ class IdentityHttp:
                 actor_user_id=principal.user.id, invite_id=invite_id,
             )
             return Response(status_code=204)
+
+        @router.get(
+            "/admin/users", response_model=AdminUserListResponse,
+            tags=["identity-admin"],
+        )
+        async def list_admin_users(
+            principal: IdentityPrincipal = Depends(
+                self.require_roles(GlobalRole.OWNER, GlobalRole.ADMIN)
+            ),
+        ) -> AdminUserListResponse:
+            records = await _invoke(
+                self.service.repository.list_users_for_admin,
+                actor_user_id=principal.user.id,
+            )
+            return AdminUserListResponse(users=[
+                await admin_user_response(record) for record in records
+            ])
+
+        @router.patch(
+            "/admin/users/{user_id}", response_model=AdminUserResponse,
+            tags=["identity-admin"],
+        )
+        async def patch_admin_user(
+            user_id: str, body: AdminUserPatch, request: Request,
+            principal: IdentityPrincipal = Depends(
+                self.require_roles(GlobalRole.OWNER, GlobalRole.ADMIN)
+            ),
+        ) -> AdminUserResponse:
+            await self.require_csrf(request, principal)
+            if (
+                body.state is None and body.storage_bytes is None
+                and body.import_bytes is None
+            ):
+                raise _error(422, "invalid_input", "at least one change is required")
+            record = await _invoke(
+                self.service.repository.update_user_for_admin,
+                actor_user_id=principal.user.id, target_user_id=user_id,
+                state=body.state, storage_bytes=body.storage_bytes,
+                import_bytes=body.import_bytes, now=self.service._clock(),
+            )
+            return await admin_user_response(record)
+
+        @router.get(
+            "/admin/audit", response_model=AdminAuditResponse,
+            tags=["identity-admin"],
+        )
+        async def list_admin_audit(
+            limit: int = 100,
+            principal: IdentityPrincipal = Depends(
+                self.require_roles(GlobalRole.OWNER, GlobalRole.ADMIN)
+            ),
+        ) -> AdminAuditResponse:
+            events = await _invoke(
+                self.service.repository.list_audit_for_admin,
+                actor_user_id=principal.user.id, limit=limit,
+            )
+            # Deliberately omit metadata: the admin API exposes operational identity,
+            # not arbitrary strings that could have been supplied as content.
+            return AdminAuditResponse(events=[{
+                "id": item.id, "occurred_at": item.occurred_at,
+                "actor_user_id": item.actor_user_id,
+                "target_user_id": item.target_user_id,
+                "action": item.action, "resource_type": item.resource_type,
+                "resource_id": item.resource_id, "outcome": item.outcome,
+            } for item in events])
 
 
 def build_identity_http(

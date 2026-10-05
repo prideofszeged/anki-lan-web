@@ -99,6 +99,13 @@ class UserQuota:
 
 
 @dataclass(frozen=True)
+class AdminUserRecord:
+    user: User
+    quota: UserQuota
+    last_login_at: datetime | None
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     id: int
     occurred_at: datetime

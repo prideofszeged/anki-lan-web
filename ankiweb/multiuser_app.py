@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
@@ -116,6 +117,10 @@ def _account_html(user, sessions, *, csrf_cookie_name: str) -> str:
         f"<span class='pill'>{'Current' if index == 0 else 'Active'}</span></li>"
         for index, item in enumerate(sessions)
     ) or "<li>No active sessions</li>"
+    admin_link = (
+        "<a href='/admin'>Administration</a>"
+        if user.global_role.value in {"owner", "admin"} else ""
+    )
     cookie = json.dumps(csrf_cookie_name)
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
@@ -146,7 +151,7 @@ def _account_html(user, sessions, *, csrf_cookie_name: str) -> str:
         f"{html.escape((user.display_name or user.username)[0].upper())}</span><div><h1>"
         f"{html.escape(user.display_name or user.username)}</h1><p>@{html.escape(user.username)} · "
         f"{html.escape(user.global_role.value.title())}</p></div><div class='top-actions'>"
-        "<a href='/shares'>Shared decks</a>"
+        f"{admin_link}<a href='/shares'>Shared decks</a>"
         "<a href='/deckbrowser'>Back to decks</a><button id='logout' class='danger'>Sign out</button>"
         f"</div></header>{invite}<section><h2>Active sessions</h2><ul>{rows}</ul></section>"
         "</main><script>"
@@ -324,6 +329,70 @@ def _shares_html(details, names: dict[str, str], *, csrf_cookie_name: str) -> st
     )
 
 
+def _admin_html(records, usage: dict[str, int | None], backup_age: dict[str, int | None], *,
+                csrf_cookie_name: str) -> str:
+    cards = []
+    for record in records:
+        user, quota = record.user, record.quota
+        used, age = usage.get(user.id), backup_age.get(user.id)
+        usage_text = "Unavailable" if used is None else f"{used / 1024**2:.1f} MiB"
+        age_text = "Never" if age is None else (
+            f"{age // 3600} hours" if age < 86400 else f"{age // 86400} days"
+        )
+        cards.append(
+            "<article class='user-card'><header><div><h2>" +
+            html.escape(user.display_name or user.username) + "</h2><p>@" +
+            html.escape(user.username) + " · " + html.escape(user.global_role.value.title()) +
+            "</p></div><span class='state'>" + html.escape(user.state.value.replace("_", " ").title()) +
+            "</span></header><dl><div><dt>Usage</dt><dd>" + html.escape(usage_text) +
+            "</dd></div><div><dt>Backup age</dt><dd>" + html.escape(age_text) +
+            "</dd></div></dl><form class='admin-user' data-user='" + html.escape(user.id) +
+            "'><label>Account state<select name='state'><option value='active'" +
+            (" selected" if user.state.value == "active" else "") +
+            ">Active</option><option value='suspended'" +
+            (" selected" if user.state.value == "suspended" else "") +
+            ">Suspended</option></select></label><label>Storage quota (MiB)"
+            "<input name='storage' type='number' min='1' value='" +
+            str(quota.storage_bytes // 1024**2) + "'></label><label>Import quota (MiB)"
+            "<input name='import' type='number' min='1' value='" +
+            str(quota.import_bytes // 1024**2) + "'></label><button>Save</button></form>"
+            "<p class='result' role='status' aria-live='polite'></p></article>"
+        )
+    cookie = json.dumps(csrf_cookie_name)
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
+        "<title>Administration · ankiweb</title><link rel='stylesheet' href='/shell/static/mobile.css'>"
+        "<style>.admin-page{width:min(100% - 28px,920px);margin:24px auto 80px}.admin-head{display:flex;"
+        "justify-content:space-between;gap:16px;align-items:center}.admin-head h1{margin:0;font-size:1.5rem}"
+        ".admin-head p,.user-card p{color:var(--muted)}.user-card{background:var(--surface);border:1px solid var(--border);"
+        "border-radius:16px;padding:18px;margin:14px 0}.user-card header{display:flex;justify-content:space-between;gap:12px}"
+        ".user-card h2{margin:0;font-size:1.1rem}.user-card header p{margin:4px 0}.state{height:max-content;"
+        "padding:5px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:.8rem}"
+        "dl{display:flex;gap:24px;margin:14px 0}dl div{min-width:120px}dt{color:var(--muted);font-size:.78rem}"
+        "dd{margin:3px 0;font-weight:700}.admin-user{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;"
+        "align-items:end;border-top:1px solid var(--border);padding-top:14px}.admin-user label{font-size:.8rem;color:var(--muted)}"
+        ".admin-user input,.admin-user select{display:block;width:100%;min-height:44px;margin-top:5px;padding:8px;"
+        "border:1px solid var(--border);border-radius:9px;background:var(--surface);color:var(--text)}"
+        ".result{min-height:20px}.audit{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px}"
+        "@media(max-width:680px){.admin-user{grid-template-columns:1fr}.admin-user button{width:100%}dl{flex-wrap:wrap}}"
+        "</style></head><body><main class='admin-page'><header class='admin-head'><div><h1>Account administration</h1>"
+        "<p>Identity, capacity, and backup metadata only.</p></div><a href='/account'>Account</a></header>" +
+        "".join(cards) + "<section class='audit'><h2>Recent operations</h2><ul id='audit-list'><li>Loading…</li>"
+        "</ul></section></main><script>" + f"const csrfName={cookie};" +
+        "const csrf=()=>decodeURIComponent((document.cookie.split('; ').find(x=>x.startsWith(csrfName+'='))||'=').split('=').slice(1).join('='));"
+        "document.querySelectorAll('.admin-user').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const d=new FormData(form),"
+        "out=form.nextElementSibling,body={state:d.get('state'),storage_bytes:Number(d.get('storage'))*1048576,"
+        "import_bytes:Number(d.get('import'))*1048576};const r=await fetch('/api/v1/admin/users/'+encodeURIComponent(form.dataset.user),"
+        "{method:'PATCH',headers:{'content-type':'application/json','x-csrf-token':csrf()},body:JSON.stringify(body)});"
+        "out.textContent=r.ok?'Saved':'Update failed';if(r.ok)setTimeout(()=>location.reload(),500)});"
+        "fetch('/api/v1/admin/audit?limit=30').then(r=>r.ok?r.json():{events:[]}).then(data=>{const list=document.getElementById('audit-list');"
+        "list.replaceChildren();for(const event of data.events){const item=document.createElement('li');item.textContent=new Date(event.occurred_at)"
+        ".toLocaleString()+' · '+event.action+' · '+event.outcome;list.append(item)}if(!data.events.length){const item=document.createElement('li');"
+        "item.textContent='No operations recorded';list.append(item)}});</script></body></html>"
+    )
+
+
 def create_multi_user_app(settings: Settings) -> FastAPI:
     if not settings.multi_user:
         raise ValueError("multi-user settings required")
@@ -349,6 +418,19 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         registry=registry,
     )
     limiter = LoginLimiter()
+
+    def user_backup_age(user_id: str) -> int | None:
+        root = storage.user_paths(user_id).backups
+        if not root.exists():
+            return None
+        timestamps = [
+            path.stat().st_mtime for path in root.glob("*.tar.gz")
+            if path.is_file() and not path.is_symlink()
+        ]
+        if not timestamps:
+            return None
+        return max(0, int(datetime.now(timezone.utc).timestamp() - max(timestamps)))
+
     identity_http = build_identity_http(
         identity,
         secure_cookie=settings.secure_cookie,
@@ -359,6 +441,8 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
             login_client(request, settings.trusted_proxy_cidrs)
         ),
         trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
+        usage_provider=storage.user_usage_bytes,
+        backup_age_provider=user_backup_age,
     )
     ready = False
     upload_locks: dict[str, asyncio.Lock] = {}
@@ -418,7 +502,7 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
     }
 
     def is_control_path(path: str) -> bool:
-        return path in {"/account", "/shares", "/shares/invite"} or path.startswith((
+        return path in {"/account", "/admin", "/shares", "/shares/invite"} or path.startswith((
             f"{API_PREFIX}/auth/",
             f"{API_PREFIX}/admin/",
             f"{API_PREFIX}/account-invites/",
@@ -592,6 +676,32 @@ def create_multi_user_app(settings: Settings) -> FastAPI:
         }
         return HTMLResponse(_shares_html(
             details, names, csrf_cookie_name=identity_http.csrf_cookie_name,
+        ))
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_page(request: Request):
+        principal = await identity_http.optional_principal(request)
+        if principal is None:
+            return RedirectResponse("/login", status_code=303)
+        if principal.user.global_role.value not in {"owner", "admin"}:
+            return PlainTextResponse("forbidden", status_code=403)
+        records = await asyncio.to_thread(
+            identity.repository.list_users_for_admin,
+            actor_user_id=principal.user.id,
+        )
+        usages = await asyncio.gather(*(
+            asyncio.to_thread(storage.user_usage_bytes, record.user.id)
+            for record in records
+        ))
+        ages = await asyncio.gather(*(
+            asyncio.to_thread(user_backup_age, record.user.id)
+            for record in records
+        ))
+        return HTMLResponse(_admin_html(
+            records,
+            {record.user.id: value for record, value in zip(records, usages)},
+            {record.user.id: value for record, value in zip(records, ages)},
+            csrf_cookie_name=identity_http.csrf_cookie_name,
         ))
 
     app.include_router(identity_http.router)

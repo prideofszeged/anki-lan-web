@@ -10,7 +10,8 @@ from typing import Any, Callable, Mapping
 
 from .database import IdentityDatabase
 from .models import (
-    AccountInvite, AccountState, AuditEvent, Credential, GlobalRole, Session, User, UserQuota,
+    AccountInvite, AccountState, AdminUserRecord, AuditEvent, Credential, GlobalRole,
+    Session, User, UserQuota,
 )
 
 
@@ -512,6 +513,132 @@ class IdentityRepository:
             if not row:
                 raise NotFoundError("quota not found")
             return UserQuota(**dict(row))
+
+    @staticmethod
+    def _require_admin(conn: sqlite3.Connection, actor_user_id: str) -> sqlite3.Row:
+        actor = conn.execute("SELECT * FROM users WHERE id=?", (actor_user_id,)).fetchone()
+        if (
+            actor is None or actor["state"] != AccountState.ACTIVE.value
+            or actor["global_role"] not in {GlobalRole.OWNER.value, GlobalRole.ADMIN.value}
+        ):
+            raise AuthorizationError("active owner or admin required")
+        return actor
+
+    def list_users_for_admin(self, *, actor_user_id: str) -> list[AdminUserRecord]:
+        """List control-plane metadata only; collection content is unreachable here."""
+        with self.database.read() as conn:
+            self._require_admin(conn, actor_user_id)
+            rows = conn.execute(
+                """SELECT u.*,q.storage_bytes,q.import_bytes,q.active_jobs,
+                   q.active_sessions,q.review_sockets,
+                   (SELECT max(s.created_at) FROM sessions s WHERE s.user_id=u.id) last_login_at
+                   FROM users u JOIN user_quotas q ON q.user_id=u.id
+                   ORDER BY u.created_at,u.id"""
+            ).fetchall()
+            return [AdminUserRecord(
+                user=_user(row),
+                quota=UserQuota(
+                    user_id=row["id"], storage_bytes=row["storage_bytes"],
+                    import_bytes=row["import_bytes"], active_jobs=row["active_jobs"],
+                    active_sessions=row["active_sessions"],
+                    review_sockets=row["review_sockets"],
+                ),
+                last_login_at=_datetime(row["last_login_at"]),
+            ) for row in rows]
+
+    def update_user_for_admin(
+        self, *, actor_user_id: str, target_user_id: str,
+        state: AccountState | None, storage_bytes: int | None,
+        import_bytes: int | None, now: datetime,
+    ) -> AdminUserRecord:
+        if storage_bytes is not None and storage_bytes < 1:
+            raise ValueError("storage quota must be positive")
+        if import_bytes is not None and import_bytes < 1:
+            raise ValueError("import quota must be positive")
+        if state not in {None, AccountState.ACTIVE, AccountState.SUSPENDED}:
+            raise ValueError("admin may only activate or suspend accounts")
+        with self.database.transaction() as conn:
+            actor = self._require_admin(conn, actor_user_id)
+            target = conn.execute(
+                "SELECT * FROM users WHERE id=?", (target_user_id,),
+            ).fetchone()
+            if target is None:
+                raise NotFoundError("user not found")
+            if (
+                actor["global_role"] == GlobalRole.ADMIN.value
+                and target["global_role"] != GlobalRole.USER.value
+            ):
+                raise AuthorizationError("administrators cannot modify privileged accounts")
+            if (
+                state is AccountState.SUSPENDED
+                and target["global_role"] == GlobalRole.OWNER.value
+                and target["state"] == AccountState.ACTIVE.value
+            ):
+                active_owners = conn.execute(
+                    """SELECT count(*) FROM users
+                       WHERE global_role='owner' AND state='active'"""
+                ).fetchone()[0]
+                if active_owners <= 1:
+                    raise LastOwnerError("cannot deactivate the last active owner")
+            if state is not None and state.value != target["state"]:
+                conn.execute(
+                    """UPDATE users SET state=?,suspended_at=?,purge_after=NULL,
+                       auth_epoch=auth_epoch+? WHERE id=?""",
+                    (
+                        state.value, _epoch(now) if state is AccountState.SUSPENDED else None,
+                        0 if state is AccountState.ACTIVE else 1, target_user_id,
+                    ),
+                )
+                if state is not AccountState.ACTIVE:
+                    conn.execute("DELETE FROM sessions WHERE user_id=?", (target_user_id,))
+            quota = conn.execute(
+                "SELECT * FROM user_quotas WHERE user_id=?", (target_user_id,),
+            ).fetchone()
+            conn.execute(
+                """UPDATE user_quotas SET storage_bytes=?,import_bytes=? WHERE user_id=?""",
+                (
+                    storage_bytes if storage_bytes is not None else quota["storage_bytes"],
+                    import_bytes if import_bytes is not None else quota["import_bytes"],
+                    target_user_id,
+                ),
+            )
+            metadata = json.dumps({
+                "state": state.value if state is not None else target["state"],
+                "storage_bytes": (
+                    storage_bytes if storage_bytes is not None else quota["storage_bytes"]
+                ),
+                "import_bytes": (
+                    import_bytes if import_bytes is not None else quota["import_bytes"]
+                ),
+            }, separators=(",", ":"), sort_keys=True)
+            conn.execute(
+                """INSERT INTO audit_events(occurred_at,actor_user_id,target_user_id,
+                   action,resource_type,resource_id,outcome,metadata_json)
+                   VALUES(?,?,?,'admin.user.updated','user',?,'success',?)""",
+                (_epoch(now), actor_user_id, target_user_id, target_user_id, metadata),
+            )
+            row = conn.execute(
+                """SELECT u.*,q.storage_bytes,q.import_bytes,q.active_jobs,
+                   q.active_sessions,q.review_sockets,
+                   (SELECT max(s.created_at) FROM sessions s WHERE s.user_id=u.id) last_login_at
+                   FROM users u JOIN user_quotas q ON q.user_id=u.id WHERE u.id=?""",
+                (target_user_id,),
+            ).fetchone()
+            return AdminUserRecord(
+                user=_user(row), quota=UserQuota(
+                    user_id=row["id"], storage_bytes=row["storage_bytes"],
+                    import_bytes=row["import_bytes"], active_jobs=row["active_jobs"],
+                    active_sessions=row["active_sessions"],
+                    review_sockets=row["review_sockets"],
+                ), last_login_at=_datetime(row["last_login_at"]),
+            )
+
+    def list_audit_for_admin(
+        self, *, actor_user_id: str, limit: int = 100,
+    ) -> list[AuditEvent]:
+        with self.database.read() as conn:
+            self._require_admin(conn, actor_user_id)
+        return self.list_audit(limit=limit)
 
     def set_quota(self, quota: UserQuota) -> None:
         with self.database.transaction() as conn:
