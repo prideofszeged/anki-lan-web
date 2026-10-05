@@ -213,6 +213,28 @@ def build_sharing_router(
                 }) from exc
             return JobResponse.of(job)
 
+        @router.post(
+            "/shares/{share_id}/releases",
+            response_model=JobResponse, status_code=202,
+        )
+        async def publish_release(
+            share_id: str, request: Request,
+            principal: IdentityPrincipal = Depends(identity_http.require_principal),
+        ) -> JobResponse:
+            await identity_http.require_csrf(request, principal)
+            try:
+                job = await job_runner.enqueue_release_publish(
+                    actor_user_id=principal.user.id, share_id=share_id,
+                    idempotency_key=request.headers.get("idempotency-key", ""),
+                )
+            except (AuthorizationError, ConflictError, NotFoundError, ValueError) as exc:
+                raise _http_error(exc) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, {
+                    "code": "job_runner_unavailable", "message": str(exc),
+                }) from exc
+            return JobResponse.of(job)
+
         @router.get("/jobs/{job_id}", response_model=JobResponse)
         async def get_job(
             job_id: str,

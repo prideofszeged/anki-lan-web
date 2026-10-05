@@ -18,6 +18,7 @@ from anki.collection import Collection
 import anki.import_export_pb2 as ie
 from anki.generic_pb2 import Empty
 
+from ankiweb.identity.repository import NotFoundError
 from ankiweb.sharing.repository import SharingRepository
 from ankiweb.tenancy import SharePaths, StorageLayout
 
@@ -348,6 +349,37 @@ class ReleasePublisher:
             share_id=share_id, version=version, manifest_path=expected_manifest,
             bundle_path=expected_bundle, manifest_sha256=record.manifest_sha256,
             bundle_sha256=record.bundle_sha256,
+        )
+
+    def recover_interrupted(
+        self, *, actor_user_id: str, share_id: str, version: int,
+    ) -> PublishedRelease | None:
+        """Validate a committed release or remove only uncommitted crash residue."""
+        self.repository.require_owner(actor_user_id=actor_user_id, share_id=share_id)
+        try:
+            self.repository.get_release(
+                actor_user_id=actor_user_id, share_id=share_id, version=version,
+            )
+        except NotFoundError:
+            expected = self.repository.next_release_version(
+                actor_user_id=actor_user_id, share_id=share_id,
+            )
+            if expected != version:
+                raise ImmutableReleaseError("interrupted release version is no longer current")
+            paths = self.storage.share_paths(share_id)
+            final = paths.releases / str(version)
+            if final.is_symlink():
+                raise ValueError("symlink not allowed in release recovery")
+            if final.exists():
+                shutil.rmtree(final)
+            if paths.releases.exists():
+                for stage in paths.releases.glob(f".stage-{version}-*"):
+                    if stage.is_symlink() or not stage.is_dir():
+                        raise ValueError("unsafe publish stage")
+                    shutil.rmtree(stage)
+            return None
+        return self.validate_release(
+            actor_user_id=actor_user_id, share_id=share_id, version=version,
         )
 
     def _manifest(

@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Callable
 
-from ankiweb.adapters.anki.sharing import WorkspaceProvisioner
+from ankiweb.adapters.anki.sharing import ReleasePublisher, WorkspaceProvisioner
 from ankiweb.identity.jobs import Job, JobRepository, JobState, request_digest
 from ankiweb.identity.repository import AuthorizationError, ConflictError
 from ankiweb.tenancy import (
@@ -16,6 +16,7 @@ from .repository import SharingRepository
 
 
 WORKSPACE_PROVISION = "share.workspace.provision"
+PUBLISH_RELEASE = "share.release.publish"
 
 
 class SharingJobRunner:
@@ -33,6 +34,7 @@ class SharingJobRunner:
         storage: StorageLayout,
         registry: RuntimeRegistry,
         provisioner: WorkspaceProvisioner | None = None,
+        publisher: ReleasePublisher | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.jobs = jobs
@@ -40,6 +42,7 @@ class SharingJobRunner:
         self.storage = storage
         self.registry = registry
         self.provisioner = provisioner or WorkspaceProvisioner(storage)
+        self.publisher = publisher or ReleasePublisher(storage, sharing, clock=clock)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._scheduled: set[str] = set()
@@ -54,13 +57,14 @@ class SharingJobRunner:
                 return
             self._accepting = True
             self._worker = asyncio.create_task(self._run(), name="sharing-job-runner")
-        for job in await asyncio.to_thread(
-            self.jobs.list_recoverable, capability=WORKSPACE_PROVISION,
-        ):
-            if job.state is JobState.RUNNING:
-                job = await self._reconcile_interrupted(job)
-            if job.state is JobState.QUEUED:
-                await self._schedule(job.id)
+        for capability in (WORKSPACE_PROVISION, PUBLISH_RELEASE):
+            for job in await asyncio.to_thread(
+                self.jobs.list_recoverable, capability=capability,
+            ):
+                if job.state is JobState.RUNNING:
+                    job = await self._reconcile_interrupted(job)
+                if job.state is JobState.QUEUED:
+                    await self._schedule(job.id)
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
@@ -108,6 +112,40 @@ class SharingJobRunner:
                 await self._schedule(job.id)
             return job
 
+    async def enqueue_release_publish(
+        self, *, actor_user_id: str, share_id: str, idempotency_key: str,
+    ) -> Job:
+        async with self._lifecycle_lock:
+            if not self._accepting:
+                raise RuntimeError("sharing job runner is unavailable")
+            existing = await asyncio.to_thread(
+                self.jobs.get_by_idempotency,
+                actor_user_id=actor_user_id, idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                if existing.capability != PUBLISH_RELEASE or existing.resource_id != share_id:
+                    raise ConflictError("idempotency key was used for a different request")
+                return existing
+            version = await asyncio.to_thread(
+                self.sharing.next_release_version,
+                actor_user_id=actor_user_id, share_id=share_id,
+            )
+            progress = {"version": version}
+            request = json.dumps(
+                {"share_id": share_id, "version": version},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()
+            job, created = await asyncio.to_thread(
+                self.jobs.create_or_get,
+                actor_user_id=actor_user_id, resource_type="share",
+                resource_id=share_id, capability=PUBLISH_RELEASE,
+                idempotency_key=idempotency_key, request_hash=request_digest(request),
+                progress=progress, now=self._clock(),
+            )
+            if created or job.state is JobState.QUEUED:
+                await self._schedule(job.id)
+            return job
+
     async def _schedule(self, job_id: str) -> None:
         async with self._schedule_lock:
             if job_id in self._scheduled:
@@ -140,7 +178,12 @@ class SharingJobRunner:
         except ConflictError:
             return
         try:
-            await self._provision(job)
+            if job.capability == WORKSPACE_PROVISION:
+                await self._provision(job)
+            elif job.capability == PUBLISH_RELEASE:
+                await self._publish(job)
+            else:
+                raise ValueError("unsupported sharing job capability")
         except asyncio.CancelledError:
             # The blocking operation has reached its rollback boundary; preserve retryability.
             try:
@@ -199,6 +242,32 @@ class SharingJobRunner:
                         )
                     raise
 
+    async def _publish(self, job: Job) -> None:
+        async with self.registry.maintenance(ResourceKey.share(job.resource_id)):
+            await asyncio.to_thread(
+                self.sharing.require_owner,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+            )
+            release = await self._uncancellable_thread(
+                self.publisher.publish,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                version=int(job.progress["version"]),
+            )
+            await asyncio.to_thread(
+                self.publisher.validate_release,
+                actor_user_id=job.actor_user_id, share_id=job.resource_id,
+                version=release.version,
+            )
+            await asyncio.to_thread(
+                self.jobs.transition, job.id,
+                expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+                now=self._clock(), progress={
+                    "version": release.version,
+                    "manifest_sha256": release.manifest_sha256,
+                    "bundle_sha256": release.bundle_sha256,
+                },
+            )
+
     @staticmethod
     async def _uncancellable_thread(function, /, *args, **kwargs):
         """Let an in-flight blocking mutation reach its own rollback boundary."""
@@ -210,6 +279,8 @@ class SharingJobRunner:
             raise
 
     async def _reconcile_interrupted(self, job: Job) -> Job:
+        if job.capability == PUBLISH_RELEASE:
+            return await self._reconcile_publish(job)
         paths = self.storage.share_paths(job.resource_id)
         if paths.collection.exists():
             try:
@@ -233,6 +304,35 @@ class SharingJobRunner:
         elif paths.root.exists():
             await asyncio.to_thread(self.storage.discard_share_workspace, job.resource_id)
         return await asyncio.to_thread(self.jobs.requeue_running, job.id)
+
+    async def _reconcile_publish(self, job: Job) -> Job:
+        version = int(job.progress["version"])
+        try:
+            recover = getattr(self.publisher, "recover_interrupted", None)
+            if recover is None:
+                release = await asyncio.to_thread(
+                    self.publisher.validate_release,
+                    actor_user_id=job.actor_user_id,
+                    share_id=job.resource_id, version=version,
+                )
+            else:
+                release = await asyncio.to_thread(
+                    recover, actor_user_id=job.actor_user_id,
+                    share_id=job.resource_id, version=version,
+                )
+        except Exception:
+            return await asyncio.to_thread(self.jobs.requeue_running, job.id)
+        if release is None:
+            return await asyncio.to_thread(self.jobs.requeue_running, job.id)
+        return await asyncio.to_thread(
+            self.jobs.transition, job.id,
+            expected=JobState.RUNNING, target=JobState.SUCCEEDED,
+            now=self._clock(), progress={
+                "version": release.version,
+                "manifest_sha256": release.manifest_sha256,
+                "bundle_sha256": release.bundle_sha256,
+            },
+        )
 
     @staticmethod
     def _safe_error(exc: BaseException) -> str:

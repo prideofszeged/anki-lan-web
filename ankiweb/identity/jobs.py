@@ -137,6 +137,16 @@ class JobRepository:
             ).fetchone()
             return _job(row) if row else None
 
+    def get_by_idempotency(
+        self, *, actor_user_id: str, idempotency_key: str,
+    ) -> Job | None:
+        with self.database.read() as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE actor_user_id=? AND idempotency_key=?",
+                (actor_user_id, idempotency_key),
+            ).fetchone()
+            return _job(row) if row else None
+
     def list_recoverable(self, *, capability: str) -> list[Job]:
         with self.database.read() as conn:
             rows = conn.execute(

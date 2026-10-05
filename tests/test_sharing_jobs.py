@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from anki.collection import Collection
@@ -12,7 +13,9 @@ from ankiweb.identity import (
     IdentityDatabase, IdentityRepository, JobRepository, JobState, request_digest,
 )
 from ankiweb.sharing import SharingRepository, SharingService
-from ankiweb.sharing.jobs import SharingJobRunner, WORKSPACE_PROVISION
+from ankiweb.sharing.jobs import (
+    PUBLISH_RELEASE, SharingJobRunner, WORKSPACE_PROVISION,
+)
 from ankiweb.tenancy import ResourceKey, RuntimeRegistry, StorageLayout
 
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
@@ -47,6 +50,36 @@ class RecordingProvisioner:
     def _validate_workspace(collection: Path) -> None:
         if collection.read_bytes() != b"workspace":
             raise RuntimeError("invalid workspace")
+
+
+class RecordingPublisher:
+    def __init__(self, storage: StorageLayout) -> None:
+        self.storage = storage
+        self.calls: list[tuple[str, int]] = []
+
+    def publish(self, *, actor_user_id, share_id, version):
+        self.calls.append((share_id, version))
+        paths = self.storage.share_paths(share_id)
+        release = paths.releases / str(version)
+        release.mkdir(parents=True, mode=0o700)
+        manifest = release / "manifest.json"
+        bundle = release / "deck.apkg"
+        manifest.write_bytes(b"manifest")
+        bundle.write_bytes(b"bundle")
+        return SimpleNamespace(
+            share_id=share_id, version=version, manifest_path=manifest,
+            bundle_path=bundle, manifest_sha256="a" * 64, bundle_sha256="b" * 64,
+        )
+
+    def validate_release(self, *, actor_user_id, share_id, version):
+        release = self.storage.share_paths(share_id).releases / str(version)
+        if not (release / "manifest.json").exists():
+            raise FileNotFoundError("release missing")
+        return SimpleNamespace(
+            share_id=share_id, version=version,
+            manifest_path=release / "manifest.json", bundle_path=release / "deck.apkg",
+            manifest_sha256="a" * 64, bundle_sha256="b" * 64,
+        )
 
 
 def _stack(tmp_path):
@@ -248,4 +281,64 @@ async def test_shutdown_drains_admitted_job_and_rejects_new_work(tmp_path):
             actor_user_id=owner.id, share_id=share.id, deck_id=deck_id,
             idempotency_key="after-stop",
         )
+    await registry.drain()
+
+
+@pytest.mark.asyncio
+async def test_publish_job_waits_for_share_runtime_and_records_release_result(tmp_path):
+    storage, _, owner, _, share, _, registry, _, base = _stack(tmp_path)
+    storage.prepare_share(share.id).collection.write_bytes(b"workspace")
+    publisher = RecordingPublisher(storage)
+    runner = SharingJobRunner(
+        jobs=base.jobs, sharing=base.sharing, storage=storage, registry=registry,
+        provisioner=base.provisioner, publisher=publisher, clock=lambda: NOW,
+    )
+    await runner.start()
+    lease = await registry.acquire(ResourceKey.share(share.id))
+    job = await runner.enqueue_release_publish(
+        actor_user_id=owner.id, share_id=share.id, idempotency_key="publish-1",
+    )
+    await asyncio.sleep(0.01)
+    assert publisher.calls == []
+    await lease.release()
+    done = await _finished(runner, job.id)
+    assert done.state is JobState.SUCCEEDED
+    assert done.capability == PUBLISH_RELEASE
+    assert done.progress == {
+        "version": 1, "manifest_sha256": "a" * 64, "bundle_sha256": "b" * 64,
+    }
+    assert publisher.calls == [(share.id, 1)]
+    replay = await runner.enqueue_release_publish(
+        actor_user_id=owner.id, share_id=share.id, idempotency_key="publish-1",
+    )
+    assert replay.id == done.id
+    await runner.stop()
+    await registry.drain()
+
+
+@pytest.mark.asyncio
+async def test_publish_restart_reconciles_completed_release_without_republishing(tmp_path):
+    storage, _, owner, _, share, _, registry, _, base = _stack(tmp_path)
+    storage.prepare_share(share.id).collection.write_bytes(b"workspace")
+    publisher = RecordingPublisher(storage)
+    release = publisher.publish(actor_user_id=owner.id, share_id=share.id, version=1)
+    job, _ = base.jobs.create_or_get(
+        actor_user_id=owner.id, resource_type="share", resource_id=share.id,
+        capability=PUBLISH_RELEASE, idempotency_key="publish-crash",
+        request_hash=request_digest(b"publish-crash"), progress={"version": 1}, now=NOW,
+    )
+    base.jobs.transition(
+        job.id, expected=JobState.QUEUED, target=JobState.RUNNING, now=NOW,
+    )
+    publisher.calls.clear()
+    runner = SharingJobRunner(
+        jobs=base.jobs, sharing=base.sharing, storage=storage, registry=registry,
+        provisioner=base.provisioner, publisher=publisher, clock=lambda: NOW,
+    )
+    await runner.start()
+    recovered = runner.jobs.get(job.id)
+    assert recovered.state is JobState.SUCCEEDED
+    assert recovered.progress["manifest_sha256"] == release.manifest_sha256
+    assert publisher.calls == []
+    await runner.stop()
     await registry.drain()

@@ -206,11 +206,19 @@ def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(t
             json={"deck_id": deck_id},
         ).status_code == 404
         assert client.get(f"/api/v1/jobs/{job_id}").status_code == 404
+        assert client.post(
+            f"/api/v1/shares/{share['id']}/releases",
+            headers={
+                "x-csrf-token": bob_login.json()["csrf_token"],
+                "origin": "http://testserver", "idempotency-key": "publish-idor",
+            },
+        ).status_code == 404
 
         client.cookies.clear()
-        assert client.post("/api/v1/auth/login", json={
+        owner_login = client.post("/api/v1/auth/login", json={
             "username": "alice", "password": "safe-password",
-        }).status_code == 200
+        })
+        assert owner_login.status_code == 200
         for _ in range(200):
             status = client.get(f"/api/v1/jobs/{job_id}")
             assert status.status_code == 200
@@ -219,6 +227,34 @@ def test_workspace_provision_job_http_is_async_csrf_protected_and_actor_scoped(t
             time.sleep(0.01)
         assert status.json()["state"] == "succeeded", status.text
         assert storage.share_paths(share["id"]).collection.exists()
+
+        release_endpoint = f"/api/v1/shares/{share['id']}/releases"
+        assert client.post(release_endpoint).status_code == 403
+        published = client.post(
+            release_endpoint,
+            headers={
+                "x-csrf-token": owner_login.json()["csrf_token"],
+                "origin": "http://testserver", "idempotency-key": "publish-http-1",
+            },
+        )
+        assert published.status_code == 202, published.text
+        release_job = published.json()["id"]
+        for _ in range(300):
+            status = client.get(f"/api/v1/jobs/{release_job}")
+            if status.json()["state"] in {"succeeded", "failed"}:
+                break
+            time.sleep(0.01)
+        assert status.json()["state"] == "succeeded", status.text
+        assert status.json()["progress"]["version"] == 1
+        replay = client.post(
+            release_endpoint,
+            headers={
+                "x-csrf-token": owner_login.json()["csrf_token"],
+                "origin": "http://testserver", "idempotency-key": "publish-http-1",
+            },
+        )
+        assert replay.status_code == 202
+        assert replay.json()["id"] == release_job
 
 
 def test_multiuser_app_refuses_to_start_without_an_owner(tmp_path) -> None:
