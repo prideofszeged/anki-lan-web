@@ -774,6 +774,74 @@ class SharingRepository:
                 (share_id, entity_type, entity_id),
             )]
 
+    def export_share_comments_for_backup(
+        self, *, actor_user_id: str, share_id: str,
+    ) -> list[WorkspaceComment]:
+        """Return all comment content only to the share owner for a protected backup."""
+        with self.database.read() as conn:
+            self._require_owner(conn, share_id, actor_user_id)
+            return [_comment(row) for row in conn.execute(
+                """SELECT * FROM workspace_comments WHERE share_id=?
+                   ORDER BY created_at,id""",
+                (share_id,),
+            )]
+
+    def restore_share_comments_from_backup(
+        self, *, actor_user_id: str, share_id: str,
+        comments: list[dict], backup_sha256: str, now: datetime,
+    ) -> None:
+        """Atomically replace comments after a verified filesystem restore.
+
+        Backup bodies remain in the protected archive and workspace table. Audit
+        metadata records only identifiers/counts/checksums, never comment content.
+        """
+        if len(backup_sha256) != 64:
+            raise ValueError("backup checksum must be SHA-256")
+        normalized: list[tuple] = []
+        seen: set[str] = set()
+        for item in comments:
+            comment_id = str(uuid.UUID(str(item["id"])))
+            author_id = str(uuid.UUID(str(item["author_user_id"])))
+            if comment_id in seen:
+                raise ValueError("duplicate backup comment")
+            seen.add(comment_id)
+            entity_type = str(item["entity_type"])
+            if entity_type not in {"note", "template", "deck"}:
+                raise ValueError("invalid comment entity type")
+            entity_id = str(item["entity_id"])
+            body = _comment_body(str(item["body"]))
+            created_at = int(item["created_at"])
+            updated_at = int(item["updated_at"])
+            resolved_at = item.get("resolved_at")
+            if resolved_at is not None:
+                resolved_at = int(resolved_at)
+            if created_at < 0 or updated_at < created_at:
+                raise ValueError("invalid comment timestamps")
+            normalized.append((
+                comment_id, share_id, entity_type, entity_id, author_id, body,
+                resolved_at, created_at, updated_at,
+            ))
+        with self.database.transaction() as conn:
+            self._require_owner(conn, share_id, actor_user_id)
+            for row in normalized:
+                if not conn.execute(
+                    "SELECT 1 FROM users WHERE id=?", (row[4],),
+                ).fetchone():
+                    raise ValueError("backup comment author does not exist")
+            conn.execute("DELETE FROM workspace_comments WHERE share_id=?", (share_id,))
+            conn.executemany(
+                """INSERT INTO workspace_comments(
+                   id,share_id,entity_type,entity_id,author_user_id,body,resolved_at,
+                   created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                normalized,
+            )
+            self._audit(
+                conn, now=now, actor=actor_user_id, action="share.backup.restored",
+                share_id=share_id, metadata={
+                    "backup_sha256": backup_sha256, "comment_count": len(normalized),
+                },
+            )
+
     def edit_workspace_comment(
         self, *, actor_user_id: str, share_id: str, comment_id: str,
         body: str, now: datetime,
