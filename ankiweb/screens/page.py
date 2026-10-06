@@ -211,7 +211,11 @@ def spa_navigation_html(context: str) -> str:
         if href == "/graphs" and context == "graphs":
             extra += " aria-current='page'"
         toolbar = toolbar.replace(f"href='{href}'", f"href='{href}'{extra}", 1)
-    return toolbar + _bottomnav_html(context, direct_stats=True)
+    navigation = toolbar + _bottomnav_html(context, direct_stats=True)
+    # This markup lives beside a SvelteKit mount.  Without the reload opt-out, links which
+    # happen to match a vendored SPA route (notably /preferences) are intercepted client-side
+    # and call desktop-only RPCs instead of reaching ankiweb's server-rendered screen.
+    return navigation.replace("<a ", "<a data-sveltekit-reload ")
 
 
 def render_page(

@@ -646,3 +646,36 @@ def test_sveltekit_graphs_navigation_is_bounded_without_cached_shell_assets(
 
         context.close()
         browser.close()
+
+
+def test_sveltekit_graphs_shell_links_force_server_navigation(live_server_layout):
+    """Known Svelte routes in the injected shell must not be client-routed by the SPA."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
+        dialogs = []
+        config_requests = []
+
+        def accept_dialog(dialog):
+            dialogs.append(dialog.message)
+            dialog.accept()
+
+        page.on("dialog", accept_dialog)
+        page.on(
+            "request",
+            lambda request: config_requests.append(request.url)
+            if "/_anki/getConfigJson" in request.url else None,
+        )
+        page.goto(f"{live_server_layout}/graphs")
+        page.wait_for_selector(".graphs-container", timeout=10000)
+        page.locator("#ankiweb-toolbar a[href='/preferences']").click()
+        page.wait_for_url("**/preferences", timeout=10000)
+        page.wait_for_selector("body[data-context='preferences']", timeout=10000)
+
+        assert not dialogs
+        assert not config_requests
+        assert page.locator("#ankiweb-toolbar").is_visible()
+
+        context.close()
+        browser.close()

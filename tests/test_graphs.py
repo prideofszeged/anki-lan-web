@@ -39,6 +39,12 @@ def test_graphs_serves_spa_shell(client):
     assert len(svgs) == 5
     assert all("width='20'" in svg and "height='20'" in svg for svg in svgs)
     assert all("aria-hidden='true'" in svg and "focusable='false'" in svg for svg in svgs)
+    shell = body.split("id='ankiweb-toolbar'", 1)[1].split(
+        '<div style="display: contents">', 1,
+    )[0]
+    links = re.findall(r"<a\b[^>]*>", shell)
+    assert links
+    assert all("data-sveltekit-reload" in link for link in links)
 
 
 def test_service_worker_versions_and_activates_new_spa_navigation(client):
