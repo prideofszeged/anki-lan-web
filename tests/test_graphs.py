@@ -18,6 +18,20 @@ def test_graphs_serves_spa_shell(client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert "_app/immutable/entry" in r.text
+    body = r.text
+    assert "data-context=\"graphs\"" in body
+    assert "id='ankiweb-toolbar'" in body
+    assert "id='ankiweb-bottomnav'" in body
+    assert "aria-label='Primary navigation'" in body
+    assert "href='/deckbrowser'" in body
+    assert "href='/add'" in body
+    assert "href='/browse'" in body
+    assert "href='/graphs'" in body
+    assert "id='ankiweb-more-btn'" in body
+    assert "data-nav-key='stats'" in body
+    assert "aria-current='page'" in body
+    assert "/shell/static/spa-nav.css" in body
+    assert "/shell/static/spa-nav.js" in body
 
 
 def test_app_asset_served_as_js_module_with_cache(client):

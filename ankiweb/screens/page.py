@@ -85,25 +85,33 @@ def _toolbar_html() -> str:
     )
 
 
-def _bottomnav_html(context: str) -> str:
+def _bottomnav_html(context: str, *, direct_stats: bool = False) -> str:
     """Server-rendered compact bottom tab bar (<nav id='ankiweb-bottomnav'>) and bottom
     sheet for 'More'. 5 tabs: Decks, Study, Add, Browse, More. Active tab indicated by context."""
     decks_active = context == "deckbrowser"
     study_active = context in ("overview", "reviewer", "customstudy", "filtereddeck")
     add_active = context == "add"
     browse_active = context in ("browser", "editor")
-    more_active = context in ("graphs", "preferences", "tools", "about", "notify", "account")
+    stats_active = direct_stats and context == "graphs"
+    more_active = context in ("preferences", "tools", "about", "notify", "account") or (
+        context == "graphs" and not direct_stats
+    )
 
-    def tab(href: str, label: str, svg: str, active: bool, is_btn: bool = False) -> str:
+    def tab(
+        href: str, label: str, svg: str, active: bool, key: str, is_btn: bool = False,
+    ) -> str:
         cls = "tab-item active" if active else "tab-item"
         if is_btn:
             return (
-                f"<button type='button' id='ankiweb-more-btn' class='{cls}' "
+                f"<button type='button' id='ankiweb-more-btn' class='{cls}' data-nav-key='{key}' "
                 f"aria-haspopup='dialog' aria-expanded='false' aria-controls='ankiweb-more-sheet' "
                 f"onclick='ankiwebToggleMore()'>{svg}<span class='tab-label'>{label}</span></button>"
             )
         cur = " aria-current='page'" if active else ""
-        return f"<a href='{href}' class='{cls}'{cur}>{svg}<span class='tab-label'>{label}</span></a>"
+        return (
+            f"<a href='{href}' class='{cls}' data-nav-key='{key}'{cur}>"
+            f"{svg}<span class='tab-label'>{label}</span></a>"
+        )
 
     decks_svg = (
         "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
@@ -127,14 +135,32 @@ def _bottomnav_html(context: str) -> str:
         "<circle cx='12' cy='12' r='1'></circle><circle cx='19' cy='12' r='1'></circle>"
         "<circle cx='5' cy='12' r='1'></circle></svg>"
     )
+    stats_svg = (
+        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<path d='M4 19V9'></path><path d='M10 19V5'></path>"
+        "<path d='M16 19v-7'></path><path d='M22 19V3'></path></svg>"
+    )
+
+    if direct_stats:
+        tabs = (
+            tab("/deckbrowser", tr.actions_decks(), decks_svg, decks_active, "decks")
+            + tab("/add", tr.actions_add(), add_svg, add_active, "add")
+            + tab("/browse", tr.qt_misc_browse(), browse_svg, browse_active, "browse")
+            + tab("/graphs", tr.qt_misc_stats(), stats_svg, stats_active, "stats")
+            + tab("#", tr.studying_more(), more_svg, more_active, "more", is_btn=True)
+        )
+    else:
+        tabs = (
+            tab("/deckbrowser", tr.actions_decks(), decks_svg, decks_active, "decks")
+            + tab("/overview", tr.decks_study(), study_svg, study_active, "study")
+            + tab("/add", tr.actions_add(), add_svg, add_active, "add")
+            + tab("/browse", tr.qt_misc_browse(), browse_svg, browse_active, "browse")
+            + tab("#", tr.studying_more(), more_svg, more_active, "more", is_btn=True)
+        )
 
     return (
-        "<nav id='ankiweb-bottomnav' aria-label='Navigation'>"
-        f"{tab('/deckbrowser', tr.actions_decks(), decks_svg, decks_active)}"
-        f"{tab('/overview', tr.decks_study(), study_svg, study_active)}"
-        f"{tab('/add', tr.actions_add(), add_svg, add_active)}"
-        f"{tab('/browse', tr.qt_misc_browse(), browse_svg, browse_active)}"
-        f"{tab('#', tr.studying_more(), more_svg, more_active, is_btn=True)}"
+        "<nav id='ankiweb-bottomnav' aria-label='Primary navigation'>"
+        f"{tabs}"
         "</nav>"
         "<div id='ankiweb-more-sheet' class='more-sheet' hidden>"
         "<div class='backdrop' onclick='ankiwebToggleMore(false)'></div>"
@@ -152,6 +178,34 @@ def _bottomnav_html(context: str) -> str:
         "\U0001F319 Toggle night mode</button>"
         "</div></div></div>"
     )
+
+
+def spa_navigation_html(context: str) -> str:
+    """Navigation injected into standalone vendored SPA documents.
+
+    SvelteKit owns its mount node, so the server shell lives beside that node rather than
+    wrapping it.  Keep the markup shared with regular pages while giving Stats a direct,
+    accurately-selected compact tab.
+    """
+    toolbar = _toolbar_html()
+    toolbar = toolbar.replace(
+        "<div id='ankiweb-toolbar'>",
+        "<nav id='ankiweb-toolbar' aria-label='Primary navigation'>",
+        1,
+    )
+    toolbar = toolbar.rsplit("</div>", 1)[0] + "</nav>"
+    nav_keys = {
+        "/deckbrowser": "decks",
+        "/add": "add",
+        "/browse": "browse",
+        "/graphs": "stats",
+    }
+    for href, key in nav_keys.items():
+        extra = f" data-nav-key='{key}'"
+        if href == "/graphs" and context == "graphs":
+            extra += " aria-current='page'"
+        toolbar = toolbar.replace(f"href='{href}'", f"href='{href}'{extra}", 1)
+    return toolbar + _bottomnav_html(context, direct_stats=True)
 
 
 def render_page(

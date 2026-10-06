@@ -543,40 +543,72 @@ def test_add_redesign_accessible_responsive_and_dark(live_server_layout):
         browser.close()
 
 
-def test_sveltekit_graphs_mobile_chrome_affordance(live_server_layout):
+def test_sveltekit_graphs_has_responsive_persistent_navigation(live_server_layout):
     base = live_server_layout
     with sync_playwright() as p:
         browser = p.chromium.launch()
 
-        # 1. iPhone 13 portrait: visible, >= 44x44, and navigates to /deckbrowser
-        context = browser.new_context(**p.devices["iPhone 13"])
+        context = browser.new_context(viewport={"width": 390, "height": 844})
         page = context.new_page()
         page.goto(f"{base}/graphs")
-        page.wait_for_selector("#ankiweb-spa-back", state="visible", timeout=6000)
+        page.wait_for_selector(".graphs-container", timeout=10000)
+        nav = page.locator("#ankiweb-bottomnav")
+        assert nav.is_visible()
+        assert not page.locator("#ankiweb-toolbar").is_visible()
+        assert page.locator("#ankiweb-bottomnav [data-nav-key='stats']").get_attribute(
+            "aria-current"
+        ) == "page"
+        tabs = page.locator("#ankiweb-bottomnav .tab-item")
+        assert tabs.count() == 5
+        for index in range(tabs.count()):
+            box = tabs.nth(index).bounding_box()
+            assert box and box["height"] >= 44 and box["width"] >= 44
+        assert page.evaluate("document.documentElement.scrollWidth") <= 391
 
-        box = page.locator("#ankiweb-spa-back").bounding_box()
-        assert box is not None
-        assert box["width"] >= 44, f"affordance width {box['width']} < 44"
-        assert box["height"] >= 44, f"affordance height {box['height']} < 44"
+        page.locator("#ankiweb-more-btn").click()
+        assert page.locator("#ankiweb-more-sheet .panel").is_visible()
+        page.keyboard.press("Escape")
+        assert not page.locator("#ankiweb-more-sheet").is_visible()
 
-        page.click("#ankiweb-spa-back")
-        page.wait_for_url("**/deckbrowser*", timeout=6000)
-        assert "/deckbrowser" in page.url
-
-        # 2. Preserves #night convention
-        page.goto(f"{base}/graphs#night")
-        page.wait_for_selector("#ankiweb-spa-back", state="visible", timeout=6000)
-        page.click("#ankiweb-spa-back")
-        page.wait_for_url("**/deckbrowser*", timeout=6000)
-        assert "/deckbrowser#night" in page.url
+        for key, path in (("decks", "/deckbrowser"), ("add", "/add"), ("browse", "/browse")):
+            page.goto(f"{base}/graphs")
+            page.wait_for_selector("#ankiweb-bottomnav")
+            page.locator(f"#ankiweb-bottomnav [data-nav-key='{key}']").click()
+            page.wait_for_url(f"**{path}*", timeout=6000)
+            assert path in page.url
         context.close()
 
-        # 3. Desktop >= 640px: hidden
-        d_context = browser.new_context(viewport={"width": 1280, "height": 800})
+        dark_context = browser.new_context(
+            viewport={"width": 390, "height": 844}, color_scheme="dark",
+        )
+        dark_page = dark_context.new_page()
+        dark_page.goto(f"{base}/graphs")
+        dark_page.wait_for_selector(".graphs-container", timeout=10000)
+        dark_colors = dark_page.evaluate(
+            """() => ({
+                body: getComputedStyle(document.body).backgroundColor,
+                heading: getComputedStyle(document.querySelector('.graphs-container h1')).color,
+                nav: getComputedStyle(document.querySelector('#ankiweb-bottomnav')).backgroundColor,
+            })"""
+        )
+        assert dark_colors["body"] != "rgb(245, 245, 245)"
+        assert dark_colors["heading"] != "rgb(2, 2, 2)"
+        assert dark_colors["nav"] != "rgb(255, 255, 255)"
+        dark_context.close()
+
+        d_context = browser.new_context(viewport={"width": 1440, "height": 900})
         d_page = d_context.new_page()
         d_page.goto(f"{base}/graphs")
         d_page.wait_for_selector(".graphs-container", timeout=10000)
-        assert not d_page.is_visible("#ankiweb-spa-back")
+        toolbar = d_page.locator("#ankiweb-toolbar")
+        assert toolbar.is_visible()
+        assert not d_page.locator("#ankiweb-bottomnav").is_visible()
+        toolbar_box = toolbar.bounding_box()
+        filters_box = d_page.locator(".graphs-container").bounding_box()
+        assert toolbar_box and filters_box
+        assert filters_box["y"] >= toolbar_box["y"] + toolbar_box["height"]
+        d_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        assert toolbar.bounding_box()["y"] == pytest.approx(0, abs=1)
         d_context.close()
 
         browser.close()

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Callable
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from ankiweb.screens.page import spa_navigation_html
 
 # Injected into the served SvelteKit shell so the SPA's bridgeCommand("browserSearch:<q>")
 # (e.g. graphs count-links) opens ankiweb's browser instead of being a no-op. The SPA has no
@@ -111,44 +112,52 @@ def build_sveltekit_router(assets_dir: Path) -> APIRouter:
     router = APIRouter()
     index = assets_dir / "sveltekit" / "index.html"
 
-    def _render_shell(include_bridge: bool = False) -> str:
+    def _render_shell(context: str, include_bridge: bool = False) -> str:
         html = index.read_text(encoding="utf-8")
         injections = []
         if include_bridge:
             injections.append(_SPA_BRIDGE)
         injections.append(_SPA_NAV_TAGS)
-        return html.replace("<head>", "<head>" + "".join(injections), 1)
+        html = html.replace("<head>", "<head>" + "".join(injections), 1)
+        if context == "graphs":
+            body = '<body data-sveltekit-preload-data="hover">'
+            shell_body = (
+                f'<body data-context="{context}" data-sveltekit-preload-data="hover">'
+                + spa_navigation_html(context)
+            )
+            html = html.replace(body, shell_body, 1)
+        return html
 
     @router.get("/graphs")
     def graphs_page() -> Response:
         # served with the browserSearch bridge so the stats count-links open /browse
-        return HTMLResponse(_render_shell(include_bridge=True))
+        return HTMLResponse(_render_shell("graphs", include_bridge=True))
 
     @router.get("/deck-options/{deck_id}")
     def deck_options_page(deck_id: str) -> Response:
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("deck-options"))
 
     @router.get("/change-notetype/{ids:path}")
     def change_notetype_page(ids: str) -> Response:
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("change-notetype"))
 
     @router.get("/card-info/{ids:path}")
     def card_info_page(ids: str) -> Response:
         # SvelteKit route nodes: /card-info/[cardId] and /card-info/[cardId]/[previousId].
         # Bundle is vendored; card_stats / get_review_logs are already PASSTHROUGH RPCs.
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("card-info"))
 
     @router.get("/import-csv/{path:path}")
     def import_csv_page(path: str) -> Response:
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("import-csv"))
 
     @router.get("/import-anki-package/{path:path}")
     def import_anki_package_page(path: str) -> Response:
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("import-anki-package"))
 
     @router.get("/image-occlusion/{path:path}")
     def image_occlusion_page(path: str) -> Response:
-        return HTMLResponse(_render_shell())
+        return HTMLResponse(_render_shell("image-occlusion"))
 
     @router.get("/_app/{path:path}")
     def app_asset(path: str) -> Response:
