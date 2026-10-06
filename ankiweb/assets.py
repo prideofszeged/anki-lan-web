@@ -16,8 +16,37 @@ _SPA_BRIDGE = (
 )
 
 _SPA_NAV_TAGS = (
-    '<link rel="stylesheet" href="/shell/static/spa-nav.css">'
-    '<script src="/shell/static/spa-nav.js" defer></script>'
+    '<link rel="stylesheet" href="/shell/static/spa-nav.css?v=3">'
+    '<script src="/shell/static/spa-nav.js?v=3" defer></script>'
+)
+
+# Navigation markup is server-injected into a separately-built SvelteKit document.  Keep its
+# geometry safe in the HTML itself: an older service worker may briefly have neither matching
+# CSS nor JS while the new version activates.  The versioned stylesheet supplies all visual
+# polish; this only bounds the shell and prevents viewBox-only SVGs from filling the viewport.
+_SPA_NAV_CRITICAL = (
+    "<style id='ankiweb-spa-nav-critical'>"
+    "body[data-context=graphs]{margin:0;max-width:100%;overflow-x:hidden;"
+    "padding-top:calc(52px + env(safe-area-inset-top,0px))}"
+    "#ankiweb-toolbar{position:fixed;inset:0 0 auto;z-index:10000;"
+    "height:calc(52px + env(safe-area-inset-top,0px));display:flex;align-items:flex-end;gap:8px;"
+    "padding:env(safe-area-inset-top,0px) 12px 0;overflow:hidden;background:#f4f6f8;"
+    "border-bottom:1px solid #d0d5dd}"
+    "#ankiweb-toolbar>a,#ankiweb-toolbar .lbl,#ankiweb-toolbar .nm{display:inline-flex;"
+    "align-items:center;min-height:44px;padding:0 10px;white-space:nowrap}"
+    "#ankiweb-toolbar .menu .sub,#ankiweb-bottomnav,#ankiweb-more-sheet{display:none}"
+    "#ankiweb-bottomnav svg{display:block;width:20px;height:20px;max-width:20px;max-height:20px;"
+    "fill:none;stroke:currentColor}"
+    "@media(max-width:639px){body[data-context=graphs]{padding-top:0;"
+    "padding-bottom:calc(56px + env(safe-area-inset-bottom,0px))}"
+    "#ankiweb-toolbar{display:none}#ankiweb-bottomnav{position:fixed;inset:auto 0 0;"
+    "z-index:10000;min-height:calc(56px + env(safe-area-inset-bottom,0px));display:flex;"
+    "padding-bottom:env(safe-area-inset-bottom,0px);background:#fff;border-top:1px solid #d0d5dd}"
+    "#ankiweb-bottomnav .tab-item{flex:1 1 0;min-width:44px;min-height:44px;display:flex;"
+    "flex-direction:column;align-items:center;justify-content:center;padding:4px 2px;"
+    "border:0;background:transparent;color:#667085;text-decoration:none;font:12px sans-serif}"
+    "#ankiweb-bottomnav .active{color:#2563eb}}"
+    "</style>"
 )
 
 # subset of mediasrv _mime_for_path (mediasrv.py:171-210)
@@ -117,6 +146,8 @@ def build_sveltekit_router(assets_dir: Path) -> APIRouter:
         injections = []
         if include_bridge:
             injections.append(_SPA_BRIDGE)
+        if context == "graphs":
+            injections.append(_SPA_NAV_CRITICAL)
         injections.append(_SPA_NAV_TAGS)
         html = html.replace("<head>", "<head>" + "".join(injections), 1)
         if context == "graphs":

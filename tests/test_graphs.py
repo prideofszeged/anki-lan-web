@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import pytest
 from fastapi.testclient import TestClient
 from ankiweb.config import Settings
@@ -30,8 +31,23 @@ def test_graphs_serves_spa_shell(client):
     assert "id='ankiweb-more-btn'" in body
     assert "data-nav-key='stats'" in body
     assert "aria-current='page'" in body
-    assert "/shell/static/spa-nav.css" in body
-    assert "/shell/static/spa-nav.js" in body
+    assert "id='ankiweb-spa-nav-critical'" in body
+    assert "/shell/static/spa-nav.css?v=3" in body
+    assert "/shell/static/spa-nav.js?v=3" in body
+    nav = body.split("id='ankiweb-bottomnav'", 1)[1].split("</nav>", 1)[0]
+    svgs = re.findall(r"<svg\b[^>]*>", nav)
+    assert len(svgs) == 5
+    assert all("width='20'" in svg and "height='20'" in svg for svg in svgs)
+    assert all("aria-hidden='true'" in svg and "focusable='false'" in svg for svg in svgs)
+
+
+def test_service_worker_versions_and_activates_new_spa_navigation(client):
+    body = client.get("/sw.js").text
+    assert 'const CACHE = "anki-lan-shell-26.9.3-v3"' in body
+    assert '"/shell/static/spa-nav.css?v=3"' in body
+    assert '"/shell/static/spa-nav.js?v=3"' in body
+    assert "self.skipWaiting()" in body
+    assert "self.clients.claim()" in body
 
 
 def test_app_asset_served_as_js_module_with_cache(client):

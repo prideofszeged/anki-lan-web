@@ -612,3 +612,37 @@ def test_sveltekit_graphs_has_responsive_persistent_navigation(live_server_layou
         d_context.close()
 
         browser.close()
+
+
+def test_sveltekit_graphs_navigation_is_bounded_without_cached_shell_assets(
+    live_server_layout,
+):
+    """An old service worker may have no entry for a newly-versioned shell asset.
+
+    The server-injected critical shell must remain usable while that request fails and the
+    next service-worker activation replaces the old cache.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 390, "height": 844})
+        page = context.new_page()
+        page.route("**/shell/static/spa-nav.css*", lambda route: route.abort())
+        page.route("**/shell/static/spa-nav.js*", lambda route: route.abort())
+        page.goto(f"{live_server_layout}/graphs")
+        page.wait_for_selector(".graphs-container", timeout=10000)
+
+        nav = page.locator("#ankiweb-bottomnav")
+        assert nav.is_visible()
+        assert page.locator("#ankiweb-bottomnav [data-nav-key='stats']").is_visible()
+        icons = nav.locator("svg")
+        assert icons.count() == 5
+        for index in range(icons.count()):
+            box = icons.nth(index).bounding_box()
+            assert box and box["width"] <= 24 and box["height"] <= 24
+        assert page.evaluate("document.documentElement.scrollWidth") <= 391
+        assert page.locator("#ankiweb-toolbar").evaluate(
+            "el => getComputedStyle(el).position"
+        ) == "fixed"
+
+        context.close()
+        browser.close()

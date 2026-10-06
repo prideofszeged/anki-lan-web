@@ -114,29 +114,35 @@ def _bottomnav_html(context: str, *, direct_stats: bool = False) -> str:
         )
 
     decks_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<rect x='2' y='7' width='20' height='14' rx='2' ry='2'></rect>"
         "<path d='M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16'></path></svg>"
     )
     study_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<polygon points='5 3 19 12 5 21 5 3'></polygon></svg>"
     )
     add_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<line x1='12' y1='5' x2='12' y2='19'></line><line x1='5' y1='12' x2='19' y2='12'></line></svg>"
     )
     browse_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<circle cx='11' cy='11' r='8'></circle><line x1='21' y1='21' x2='16.65' y2='16.65'></line></svg>"
     )
     more_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<circle cx='12' cy='12' r='1'></circle><circle cx='19' cy='12' r='1'></circle>"
         "<circle cx='5' cy='12' r='1'></circle></svg>"
     )
     stats_svg = (
-        "<svg viewBox='0 0 24 24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<svg width='20' height='20' aria-hidden='true' focusable='false' viewBox='0 0 24 24' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
         "<path d='M4 19V9'></path><path d='M10 19V5'></path>"
         "<path d='M16 19v-7'></path><path d='M22 19V3'></path></svg>"
     )

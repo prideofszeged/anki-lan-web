@@ -1,15 +1,19 @@
-const CACHE = "anki-lan-shell-26.9.3-v2";
+const CACHE = "anki-lan-shell-26.9.3-v3";
 const SHELL = [
   "/shell/static/mobile.css",
   "/shell/static/bootstrap.js",
   "/shell/static/manifest.webmanifest",
   "/shell/static/icon.svg",
-  "/shell/static/spa-nav.css",
-  "/shell/static/spa-nav.js"
+  "/shell/static/spa-nav.css?v=3",
+  "/shell/static/spa-nav.js?v=3"
 ];
-self.addEventListener("install", event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
+self.addEventListener("install", event => event.waitUntil(
+  caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())
+));
 self.addEventListener("activate", event => event.waitUntil(
-  caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+  caches.keys()
+    .then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+    .then(() => self.clients.claim())
 ));
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
