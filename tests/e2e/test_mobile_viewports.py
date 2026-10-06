@@ -489,6 +489,60 @@ def test_add_screen_compact_stacked_fields_and_sticky_button(live_server_layout)
         browser.close()
 
 
+def test_add_redesign_accessible_responsive_and_dark(live_server_layout):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        phone = browser.new_context(viewport={"width": 390, "height": 844})
+        page = phone.new_page()
+        page.goto(f"{live_server_layout}/add")
+        page.wait_for_selector(".note-editor", timeout=10000)
+
+        controls = page.locator("#add-chrome .add-control")
+        assert controls.count() == 2
+        first, second = controls.nth(0).bounding_box(), controls.nth(1).bounding_box()
+        assert first and second and second["y"] >= first["y"] + first["height"] - 1
+        for selector in ("#add-deck", "#add-notetype", "#add-btn", "#add-close"):
+            box = page.locator(selector).bounding_box()
+            assert box and box["height"] >= 44
+
+        toolbar = page.locator(".editor-toolbar")
+        assert toolbar.evaluate("el => el.scrollWidth >= el.clientWidth")
+        assert toolbar.bounding_box()["height"] <= 64
+        assert page.evaluate("document.documentElement.scrollWidth") <= 391
+
+        page.locator("#add-deck").focus()
+        outline = page.locator("#add-deck").evaluate(
+            "el => getComputedStyle(el).outlineStyle"
+        )
+        assert outline != "none"
+        phone.close()
+
+        dark = browser.new_context(
+            viewport={"width": 390, "height": 844}, color_scheme="dark",
+        )
+        page = dark.new_page()
+        page.goto(f"{live_server_layout}/add")
+        page.wait_for_selector(".note-editor", timeout=10000)
+        body_bg = page.locator("body").evaluate("el => getComputedStyle(el).backgroundColor")
+        field_bg = page.locator(".field-container").first.evaluate(
+            "el => getComputedStyle(el).backgroundColor"
+        )
+        assert body_bg not in {"rgb(255, 255, 255)", "rgba(0, 0, 0, 0)"}
+        assert field_bg not in {"rgb(255, 255, 255)", "rgba(0, 0, 0, 0)"}
+        assert page.locator("#add-deck").evaluate("el => getComputedStyle(el).color") != "rgb(0, 0, 0)"
+        dark.close()
+
+        desktop = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = desktop.new_page()
+        page.goto(f"{live_server_layout}/add")
+        page.wait_for_selector(".note-editor", timeout=10000)
+        note = page.locator(".note-editor").bounding_box()
+        assert note and 720 <= note["width"] <= 1040
+        assert page.evaluate("document.documentElement.scrollWidth") <= 1441
+        desktop.close()
+        browser.close()
+
+
 def test_sveltekit_graphs_mobile_chrome_affordance(live_server_layout):
     base = live_server_layout
     with sync_playwright() as p:

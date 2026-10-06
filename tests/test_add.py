@@ -33,6 +33,18 @@ def test_add_route_renders(client):
     assert "Default" in r.text and "Basic" in r.text
 
 
+def test_add_route_has_accessible_scoped_responsive_shell(client):
+    body = client.get("/add").text
+    assert "id='add-page-title'" in body
+    assert "aria-labelledby='add-page-title'" in body
+    assert "class='add-control'" in body
+    assert "for='add-deck'" in body and "for='add-notetype'" in body
+    assert "id='add-close'" in body
+    assert "role='status' aria-live='polite'" in body
+    assert "body[data-context=\"add\"]" in body
+    assert "env(safe-area-inset-bottom" in body
+
+
 def test_add_ready_pushes_empty_fields(client):
     with client.websocket_connect("/ws?context=add") as ws:
         ws.send_json({"type": "cmd", "id": None, "ctx": "add", "arg": "addReady"})
