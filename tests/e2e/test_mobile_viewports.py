@@ -497,6 +497,32 @@ def test_add_redesign_accessible_responsive_and_dark(live_server_layout):
         page.goto(f"{live_server_layout}/add")
         page.wait_for_selector(".note-editor", timeout=10000)
 
+        # editable.css contains a generic `.empty` width rule.  The rich-text host also
+        # carries that class while blank, so the Add shell must override it or a new
+        # field collapses to a caret-wide strip.
+        page.wait_for_selector(".rich-text-editable", timeout=10000)
+        editor_geometry = page.locator(".field-container").first.evaluate(
+            """field => {
+                const host = field.querySelector('.rich-text-editable');
+                const area = field.querySelector('.rich-text-relative');
+                const editable = host && host.shadowRoot &&
+                    host.shadowRoot.querySelector('[contenteditable]');
+                const label = field.querySelector('.label-container');
+                return {
+                    hostWidth: host && host.getBoundingClientRect().width,
+                    areaWidth: area && area.getBoundingClientRect().width,
+                    hostBackground: host && getComputedStyle(host).backgroundColor,
+                    editableColor: editable && getComputedStyle(editable).color,
+                    labelColor: label && getComputedStyle(label).color,
+                    labelBackground: label && getComputedStyle(label).backgroundColor,
+                };
+            }"""
+        )
+        assert editor_geometry["hostWidth"] >= editor_geometry["areaWidth"] * 0.95
+        assert editor_geometry["hostBackground"] == "rgb(255, 255, 255)"
+        assert editor_geometry["editableColor"] == "rgb(0, 0, 0)"
+        assert editor_geometry["labelColor"] != editor_geometry["labelBackground"]
+
         controls = page.locator("#add-chrome .add-control")
         assert controls.count() == 2
         first, second = controls.nth(0).bounding_box(), controls.nth(1).bounding_box()
@@ -538,6 +564,14 @@ def test_add_redesign_accessible_responsive_and_dark(live_server_layout):
         page.wait_for_selector(".note-editor", timeout=10000)
         note = page.locator(".note-editor").bounding_box()
         assert note and 720 <= note["width"] <= 1040
+        desktop_field_widths = page.locator(".field-container").first.evaluate(
+            """field => {
+                const host = field.querySelector('.rich-text-editable');
+                const area = field.querySelector('.rich-text-relative');
+                return [host.getBoundingClientRect().width, area.getBoundingClientRect().width];
+            }"""
+        )
+        assert desktop_field_widths[0] >= desktop_field_widths[1] * 0.95
         assert page.evaluate("document.documentElement.scrollWidth") <= 1441
         desktop.close()
         browser.close()
