@@ -16,8 +16,8 @@ _SPA_BRIDGE = (
 )
 
 _SPA_NAV_TAGS = (
-    '<link rel="stylesheet" href="/shell/static/spa-nav.css?v=3">'
-    '<script src="/shell/static/spa-nav.js?v=3" defer></script>'
+    '<link rel="stylesheet" href="/shell/static/spa-nav.css?v=4">'
+    '<script src="/shell/static/spa-nav.js?v=4" defer></script>'
 )
 
 # Navigation markup is server-injected into a separately-built SvelteKit document.  Keep its

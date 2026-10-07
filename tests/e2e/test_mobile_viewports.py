@@ -623,11 +623,15 @@ def test_sveltekit_graphs_has_responsive_persistent_navigation(live_server_layou
                 body: getComputedStyle(document.body).backgroundColor,
                 heading: getComputedStyle(document.querySelector('.graphs-container h1')).color,
                 nav: getComputedStyle(document.querySelector('#ankiweb-bottomnav')).backgroundColor,
+                card: getComputedStyle(document.querySelector('.graphs-container > .container')).backgroundColor,
+                filters: getComputedStyle(document.querySelector('.range-box')).backgroundColor,
             })"""
         )
         assert dark_colors["body"] != "rgb(245, 245, 245)"
         assert dark_colors["heading"] != "rgb(2, 2, 2)"
         assert dark_colors["nav"] != "rgb(255, 255, 255)"
+        assert dark_colors["card"] != "rgb(255, 255, 255)"
+        assert dark_colors["filters"] != "rgb(245, 245, 245)"
         dark_context.close()
 
         d_context = browser.new_context(viewport={"width": 1440, "height": 900})
@@ -641,6 +645,23 @@ def test_sveltekit_graphs_has_responsive_persistent_navigation(live_server_layou
         filters_box = d_page.locator(".graphs-container").bounding_box()
         assert toolbar_box and filters_box
         assert filters_box["y"] >= toolbar_box["y"] + toolbar_box["height"]
+        visual_system = d_page.evaluate(
+            """() => {
+                const graphs = document.querySelector('.graphs-container');
+                const card = graphs.querySelector(':scope > .container');
+                const heading = card.querySelector('h1');
+                return {
+                    font: getComputedStyle(graphs).fontFamily,
+                    headingSize: parseFloat(getComputedStyle(heading).fontSize),
+                    cardRadius: parseFloat(getComputedStyle(card).borderRadius),
+                    graphWidth: graphs.getBoundingClientRect().width,
+                };
+            }"""
+        )
+        assert "Times New Roman" not in visual_system["font"]
+        assert visual_system["headingSize"] <= 24
+        assert visual_system["cardRadius"] >= 12
+        assert visual_system["graphWidth"] <= 1200
         d_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         assert toolbar.bounding_box()["y"] == pytest.approx(0, abs=1)
         d_context.close()

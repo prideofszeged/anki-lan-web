@@ -1,11 +1,11 @@
-const CACHE = "anki-lan-shell-26.9.3-v3";
+const CACHE = "anki-lan-shell-26.9.3-v4";
 const SHELL = [
   "/shell/static/mobile.css",
   "/shell/static/bootstrap.js",
   "/shell/static/manifest.webmanifest",
   "/shell/static/icon.svg",
-  "/shell/static/spa-nav.css?v=3",
-  "/shell/static/spa-nav.js?v=3"
+  "/shell/static/spa-nav.css?v=4",
+  "/shell/static/spa-nav.js?v=4"
 ];
 self.addEventListener("install", event => event.waitUntil(
   caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())

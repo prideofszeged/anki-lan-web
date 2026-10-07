@@ -32,8 +32,8 @@ def test_graphs_serves_spa_shell(client):
     assert "data-nav-key='stats'" in body
     assert "aria-current='page'" in body
     assert "id='ankiweb-spa-nav-critical'" in body
-    assert "/shell/static/spa-nav.css?v=3" in body
-    assert "/shell/static/spa-nav.js?v=3" in body
+    assert "/shell/static/spa-nav.css?v=4" in body
+    assert "/shell/static/spa-nav.js?v=4" in body
     nav = body.split("id='ankiweb-bottomnav'", 1)[1].split("</nav>", 1)[0]
     svgs = re.findall(r"<svg\b[^>]*>", nav)
     assert len(svgs) == 5
@@ -49,9 +49,9 @@ def test_graphs_serves_spa_shell(client):
 
 def test_service_worker_versions_and_activates_new_spa_navigation(client):
     body = client.get("/sw.js").text
-    assert 'const CACHE = "anki-lan-shell-26.9.3-v3"' in body
-    assert '"/shell/static/spa-nav.css?v=3"' in body
-    assert '"/shell/static/spa-nav.js?v=3"' in body
+    assert 'const CACHE = "anki-lan-shell-26.9.3-v4"' in body
+    assert '"/shell/static/spa-nav.css?v=4"' in body
+    assert '"/shell/static/spa-nav.js?v=4"' in body
     assert "self.skipWaiting()" in body
     assert "self.clients.claim()" in body
 
